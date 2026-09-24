@@ -49,10 +49,35 @@ VERDICT="$(jq -r '.gate.verdict' "$COMPARISON_FILE")"
 LIMIT="$(jq -r '.gate.added_behaviors.maximum' "$COMPARISON_FILE")"
 ACTUAL="$(jq -r '.gate.added_behaviors.actual' "$COMPARISON_FILE")"
 
+# The five independent gate checks, each read from the server's own verdict
+# rather than inferred. `eval compare`'s gate can fail on any one of these,
+# and the explanatory note below must say only what actually happened.
+REF_EVIDENCE_PASSED="$(jq -r '.gate.reference_evidence.passed' "$COMPARISON_FILE")"
+CAND_EVIDENCE_PASSED="$(jq -r '.gate.candidate_evidence.passed' "$COMPARISON_FILE")"
+ADDED_PASSED="$(jq -r '.gate.added_behaviors.passed' "$COMPARISON_FILE")"
+BLOCK_PASSED="$(jq -r '.gate.block_decisions.passed' "$COMPARISON_FILE")"
+CRITICAL_PASSED="$(jq -r '.gate.critical_risk_observations.passed' "$COMPARISON_FILE")"
+
 # The behavioral targets each run observed, straight from the diff.
+#
+# REFERENCE observed shared + removed (a "removed" behaviour is one the
+# reference showed and the candidate did not — it belongs to the reference's
+# own list, not the candidate's).
+#
+# CANDIDATE observed shared + added. Reusing the reference's helper here
+# would print a removed behaviour under CANDIDATE as "observed", which is
+# the opposite of what `removed` means — this fixture's agent happens to
+# make the candidate a strict superset of the reference, so removed_count
+# is always 0 today, but that is a property of the fixture, not something
+# this script checks.
 reference_targets() {
     jq -r '.behavior_diff.deltas[]
            | select(.change == "shared" or .change == "removed")
+           | .behavior.target_name' "$COMPARISON_FILE" | sort -u
+}
+shared_targets() {
+    jq -r '.behavior_diff.deltas[]
+           | select(.change == "shared")
            | .behavior.target_name' "$COMPARISON_FILE" | sort -u
 }
 added_targets() {
@@ -75,7 +100,7 @@ echo
 echo "CANDIDATE"
 while read -r target; do
     [ -n "$target" ] && printf '  %-22s observed\n' "$target"
-done < <(reference_targets)
+done < <(shared_targets)
 while read -r target; do
     [ -n "$target" ] && printf '  %-22s NEW\n' "$target"
 done < <(added_targets)
@@ -87,13 +112,35 @@ echo "  Limit: max-added-behaviors = $LIMIT (actual $ACTUAL)"
 echo "  compare exit code: $COMPARE_STATUS"
 echo
 
-if [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ]; then
-    cat <<'NOTE'
-  This FAIL is the expected outcome. The candidate introduced one behavior
-  the reference never showed, and the limit supplied was zero. It is a
-  deterministic result under the limits chosen for this demo — not a finding
-  that the candidate is unsafe, malicious or compromised.
+# eval compare's gate runs five independent checks, and any one of them
+# failing produces the same verdict "fail" and the same exit code 1. The
+# reassuring, specific story below ("the candidate merely added a behavior")
+# is only true when the added-behaviors check is the sole failure — so it is
+# only printed then. Any other failing combination is named plainly instead,
+# rather than assumed to be this demo's expected story.
+if [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ] \
+   && [ "$ADDED_PASSED" = "false" ] \
+   && [ "$REF_EVIDENCE_PASSED" = "true" ] \
+   && [ "$CAND_EVIDENCE_PASSED" = "true" ] \
+   && [ "$BLOCK_PASSED" = "true" ] \
+   && [ "$CRITICAL_PASSED" = "true" ]; then
+    cat <<NOTE
+  This FAIL is the expected outcome. The candidate introduced $ADDED added
+  behavior(s) the reference never showed, and the limit supplied was zero.
+  It is a deterministic result under the limits chosen for this demo — not a
+  finding that the candidate is unsafe, malicious or compromised.
 NOTE
+elif [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ]; then
+    echo "  Gate FAIL, but not solely from the added-behaviors check:"
+    # `if` rather than a bare `[ ... ] && echo ...`: under `set -e`, a
+    # standalone `&&` list whose test legitimately evaluates false (that
+    # check passed) would exit the whole script right here.
+    if [ "$REF_EVIDENCE_PASSED" = "false" ]; then echo "    - reference evidence check failed"; fi
+    if [ "$CAND_EVIDENCE_PASSED" = "false" ]; then echo "    - candidate evidence check failed"; fi
+    if [ "$ADDED_PASSED" = "false" ]; then echo "    - added-behaviors check failed"; fi
+    if [ "$BLOCK_PASSED" = "false" ]; then echo "    - block-decisions check failed"; fi
+    if [ "$CRITICAL_PASSED" = "false" ]; then echo "    - critical-risk-observations check failed"; fi
+    echo "  This is not a finding that the candidate is unsafe, malicious or compromised."
 else
     echo "  Unexpected: this demo expects a gate FAIL with exit 1."
 fi
