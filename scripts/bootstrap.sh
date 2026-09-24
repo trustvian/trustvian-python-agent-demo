@@ -24,9 +24,9 @@ fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 echo "Checking prerequisites"
 
 command -v go      >/dev/null 2>&1 || fail "go is not on PATH; install Go 1.27 or newer"
-command -v python3 >/dev/null 2>&1 || fail "python3 is not on PATH"
+command -v python3 >/dev/null 2>&1 || fail "python3 is not on PATH; install it with 'brew install python3' or from https://www.python.org/downloads/"
 command -v jq      >/dev/null 2>&1 || fail "jq is not on PATH; install it with 'brew install jq' or 'apt-get install jq'"
-command -v curl    >/dev/null 2>&1 || fail "curl is not on PATH"
+command -v curl    >/dev/null 2>&1 || fail "curl is not on PATH; install it with 'brew install curl' or your OS package manager"
 log "go, python3, jq, curl"
 
 # Resolution is checked here rather than discovered as a confusing
@@ -60,7 +60,9 @@ echo "Locating Trustvian"
        Clone it beside this repository, or set TRUSTVIAN_DIR to its path."
 
 for marker in go.mod cmd/trustvian platform/cmd/trustvian-local processor/cmd/trustvian-collector; do
-    [ -e "$TRUSTVIAN_DIR/$marker" ] || fail "$TRUSTVIAN_DIR does not look like a Trustvian checkout (missing $marker)"
+    [ -e "$TRUSTVIAN_DIR/$marker" ] || fail "$TRUSTVIAN_DIR does not look like a Trustvian checkout (missing $marker).
+       Check that TRUSTVIAN_DIR points at the root of the trustvian repository
+       (not a subdirectory of it), or re-clone it there."
 done
 log "found $TRUSTVIAN_DIR"
 
@@ -97,13 +99,20 @@ log "trustvian-collector"
 # ---------------------------------------------------------------------
 echo "Creating the demo Python environment"
 
+VENV_RETRY="Try removing the venv and re-running: rm -rf $VENV_DIR && make bootstrap"
+
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-    python3 -m venv "$VENV_DIR"
+    python3 -m venv "$VENV_DIR" || fail "failed to create the virtualenv at $VENV_DIR.
+       $VENV_RETRY"
 fi
-"$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+"$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip \
+    || fail "failed to upgrade pip in $VENV_DIR.
+       $VENV_RETRY"
 
 # Phase 1: the application's own declared dependencies, exactly as written.
-"$VENV_DIR/bin/python" -m pip install --quiet -r "$DEMO_ROOT/agent/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install --quiet -r "$DEMO_ROOT/agent/requirements.txt" \
+    || fail "failed to install the application's dependencies from agent/requirements.txt.
+       Check your network connection, then $VENV_RETRY"
 log "application dependencies from agent/requirements.txt"
 
 # Phase 2: the runtime instrumentation, installed on top and never written
@@ -111,16 +120,22 @@ log "application dependencies from agent/requirements.txt"
 # adds the matching instrumentation packages — here, the requests one.
 "$VENV_DIR/bin/python" -m pip install --quiet \
     "opentelemetry-distro==0.65b0" \
-    "opentelemetry-exporter-otlp-proto-http==1.44.0"
-"$VENV_DIR/bin/opentelemetry-bootstrap" -a install >/dev/null
+    "opentelemetry-exporter-otlp-proto-http==1.44.0" \
+    || fail "failed to install the OpenTelemetry runtime tooling.
+       Check your network connection, then $VENV_RETRY"
+"$VENV_DIR/bin/opentelemetry-bootstrap" -a install >/dev/null \
+    || fail "opentelemetry-bootstrap failed to install instrumentation packages.
+       $VENV_RETRY"
 log "OpenTelemetry runtime tooling (not in agent/requirements.txt)"
 
 [ -x "$VENV_DIR/bin/opentelemetry-instrument" ] \
-    || fail "opentelemetry-instrument was not installed into $VENV_DIR"
+    || fail "opentelemetry-instrument was not installed into $VENV_DIR.
+       $VENV_RETRY"
 
 "$VENV_DIR/bin/python" -m pip show opentelemetry-instrumentation-requests >/dev/null 2>&1 \
     || fail "opentelemetry-bootstrap did not install the requests instrumentation;
-       without it the agent's HTTP calls emit no spans"
+       without it the agent's HTTP calls emit no spans.
+       $VENV_RETRY"
 log "requests instrumentation present"
 
 echo

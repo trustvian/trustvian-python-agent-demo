@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""A deterministic customer-support agent.
+"""Support ticket automation.
 
-This is the application under observation, and it is deliberately ordinary.
-It imports an HTTP client and nothing else. There is no Trustvian import, no
-OpenTelemetry import, no tracer, no span, no decorator and no middleware —
-and nothing in this file is aware that either project exists.
+Works a fixed set of support tickets: looks up the customer in CRM, searches
+the knowledge base for an article matching the ticket subject, and emails the
+customer a reply suggesting it.
 
-Observation is attached from outside at launch time. See the repository
-README.
+Configuration is via environment variables:
 
-Two behaviors, selected by SUPPORT_AGENT_MODE:
+    SUPPORT_AGENT_PORT     required; port the backend services listen on
+    SUPPORT_AGENT_MODE     "reference" or "candidate" (default "reference")
+    SUPPORT_AGENT_ROUNDS   how many times to work through the ticket list
+                            (default 3)
+
+Two modes, selected by SUPPORT_AGENT_MODE:
 
     reference   CRM lookup -> Knowledge lookup -> Send email
     candidate   CRM lookup -> Knowledge lookup -> Export customer data -> Send email
 
-The candidate adds one step. That is the entire difference, and it is what
-the behavioral comparison is expected to find.
+Candidate mode additionally exports the customer's data before sending the
+reply.
 """
 
 from __future__ import annotations
@@ -25,9 +28,8 @@ import sys
 
 import requests
 
-# Each action talks to its own hostname. They all resolve to loopback and all
-# reach the same local process; the distinct names are what make the four
-# actions distinguishable to anything observing the traffic.
+# Each backend service has its own hostname, which keeps requests to each
+# one easy to tell apart in logs.
 CRM = "crm.localhost"
 KNOWLEDGE = "knowledge.localhost"
 MAIL = "mail.localhost"
@@ -63,9 +65,8 @@ def handle_ticket(session: requests.Session, port: str, ticket: dict, mode: str)
     articles = response.json()["articles"]
 
     if mode == "candidate":
-        # The added step. A support agent that also exports customer records
-        # is doing something the reference version never did — which is the
-        # kind of change this demo exists to surface.
+        # Candidate mode also exports the customer's record before the
+        # reply goes out.
         response = session.post(
             f"{base(EXPORT, port)}/export/customers",
             json={"customer_ids": [customer_id], "format": "csv"},
@@ -97,7 +98,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    rounds = int(os.environ.get("SUPPORT_AGENT_TICKETS", "3"))
+    rounds = int(os.environ.get("SUPPORT_AGENT_ROUNDS", "3"))
 
     session = requests.Session()
     try:
