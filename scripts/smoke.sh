@@ -41,12 +41,26 @@ echo
 # ---------------------------------------------------------------------
 echo "Application isolation"
 
+# grep exits 1 when it read the file and matched nothing, and 2 when it
+# could not open the file at all — `!` only inverts zero-versus-nonzero, so
+# a bare `! grep ...` collapses "clean" and "unreadable" into the same
+# passing result. Guard on readability first, explicitly, so a missing or
+# unreadable file is reported as exactly that rather than as a pass.
 no_forbidden_mentions() {
-    ! grep -nEi '(trustvian|opentelemetry)' "$DEMO_ROOT/agent/main.py"
+    local target="$DEMO_ROOT/agent/main.py"
+    if [ ! -r "$target" ]; then
+        printf '        agent/main.py is missing or unreadable at %s\n' "$target" >&2
+        return 1
+    fi
+    ! grep -nEi '(trustvian|opentelemetry)' "$target"
 }
 no_forbidden_dependencies() {
-    ! grep -nEi '^[[:space:]]*(trustvian|opentelemetry)' \
-        "$DEMO_ROOT/agent/requirements.txt"
+    local target="$DEMO_ROOT/agent/requirements.txt"
+    if [ ! -r "$target" ]; then
+        printf '        agent/requirements.txt is missing or unreadable at %s\n' "$target" >&2
+        return 1
+    fi
+    ! grep -nEi '^[[:space:]]*(trustvian|opentelemetry)' "$target"
 }
 
 check "agent/main.py mentions neither trustvian nor opentelemetry, anywhere in the file" no_forbidden_mentions

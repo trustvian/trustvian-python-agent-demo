@@ -82,6 +82,7 @@ jobs:
         working-directory: trustvian-python-agent-demo
         run: |
           echo "=== runtime ==="   ; tail -50 .runtime/trustvian-local.log 2>/dev/null || true
+          echo "=== mocks ==="     ; tail -50 .runtime/mocks.log            2>/dev/null || true
           echo "=== collectors ===" ; tail -50 .runtime/collector-*.log     2>/dev/null || true
           echo "=== agents ==="    ; tail -50 .runtime/agent-*.log          2>/dev/null || true
           echo "=== comparison ===" ; cat .demo/comparison.json             2>/dev/null || true
