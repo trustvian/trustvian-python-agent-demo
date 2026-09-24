@@ -1,0 +1,87 @@
+# Runs the demo's own smoke test on Linux.
+#
+# No secrets, no registry, no external service. Everything the demo needs is
+# built from source or installed from PyPI, which is also the point: a
+# reference demo that needed credentials would not be one.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the demo
+        uses: actions/checkout@v4
+        with:
+          path: trustvian-python-agent-demo
+
+      # The demo builds Trustvian from a sibling checkout, so CI reproduces
+      # that layout rather than special-casing itself.
+      #
+      # The ref defaults to `main`, which as of this writing does NOT yet
+      # carry the Collector's evaluation sink (task 073) — that work lives on
+      # `feat/otel-platform-evaluation-sink` and has not merged. Until it
+      # does, CI on this default will fail at bootstrap.sh's evaluation-sink
+      # guard, which names this exact problem. Set the repository variable
+      # TRUSTVIAN_REF to `feat/otel-platform-evaluation-sink` to run CI in
+      # the meantime. Once that branch merges to main, TRUSTVIAN_REF can be
+      # unset again. The default here is deliberately left as `main` rather
+      # than pinned to the feature branch, because a pinned default would
+      # break the moment that branch is deleted after merging.
+      - name: Check out Trustvian beside it
+        uses: actions/checkout@v4
+        with:
+          repository: Trustvian/trustvian
+          ref: ${{ vars.TRUSTVIAN_REF || 'main' }}
+          path: trustvian
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: trustvian/go.mod
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      # Fails here with a clear message rather than deep inside the demo if
+      # *.localhost does not resolve on the runner image.
+      - name: Verify .localhost resolution
+        run: |
+          for host in crm.localhost knowledge.localhost mail.localhost export.localhost; do
+            python3 -c "import socket,sys; socket.getaddrinfo(sys.argv[1], 80)" "$host" \
+              || { echo "::error::$host does not resolve on this runner"; exit 1; }
+          done
+
+      - name: Smoke test
+        working-directory: trustvian-python-agent-demo
+        run: make smoke
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: trustvian-python-agent-demo
+        run: |
+          echo "=== runtime ==="   ; tail -50 .runtime/trustvian-local.log 2>/dev/null || true
+          echo "=== collectors ===" ; tail -50 .runtime/collector-*.log     2>/dev/null || true
+          echo "=== agents ==="    ; tail -50 .runtime/agent-*.log          2>/dev/null || true
+          echo "=== comparison ===" ; cat .demo/comparison.json             2>/dev/null || true
