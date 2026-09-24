@@ -1,0 +1,13 @@
+# Everything the demo generates. Running it must never dirty a tracked file.
+.demo/
+.runtime/
+.trustvian/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store

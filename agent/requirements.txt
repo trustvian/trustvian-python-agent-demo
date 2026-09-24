@@ -1,0 +1,10 @@
+# The application's declared dependencies.
+#
+# There is deliberately nothing here but an ordinary HTTP client. Trustvian
+# and OpenTelemetry are absent on purpose: the whole point of this demo is
+# that an existing application gets observed without either becoming a
+# dependency of it. OpenTelemetry is installed into the demo-managed
+# environment at runtime by scripts/bootstrap.sh; it never appears here.
+#
+# `make smoke` fails the build if that stops being true.
+requests==2.32.3
