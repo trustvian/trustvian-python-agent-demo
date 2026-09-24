@@ -12,11 +12,16 @@ OTLP telemetry.
 declares `requests` and nothing else. Neither file mentions either project,
 and `make smoke` fails the build if that stops being true.
 
+A cold `make demo` takes a few minutes — it builds three Go binaries, creates
+a Python virtual environment and runs four pip install phases before the
+first byte of telemetry moves; `make smoke` adds two full evaluation runs on
+top of that. That is expected; the command has not hung.
+
 ## What this demonstrates
 
-An existing Python service is observed by Trustvian end to end, and a real
-behavioral regression is caught by a real server-side gate — with no change
-to the application's source or its dependency manifest.
+A Python service that knows nothing about Trustvian is observed end to end,
+and a real behavioral regression is caught by a real server-side gate — with
+no change to the application's source or its dependency manifest.
 
 The application is a small support-ticket agent. In its `reference` mode it
 does a CRM lookup, a knowledge-base lookup and sends an email. In its
@@ -28,9 +33,16 @@ compare the two runs.
 ## Prerequisites
 
 - Go 1.27+ — builds Trustvian from the sibling checkout
-- Python 3.9+ with `venv`
+- Python 3.10+ with `venv` — `opentelemetry-sdk`, `opentelemetry-api` and
+  `opentelemetry-distro` all declare `Requires-Python: >=3.10`; on 3.9 the
+  second bootstrap phase fails, or silently resolves an old distro
 - `jq`, `curl`, GNU-compatible `bash`
-- Network access on first run, to install packages from PyPI and Go modules
+- IPv6 loopback available — `mock_services/server.py` binds a dual-stack
+  socket so `*.localhost` resolves correctly on macOS, which prefers `::1`;
+  a host with IPv6 disabled at the kernel will fail to start the mocks
+- Network access on every run — `bootstrap.sh`'s pip upgrade and both install
+  phases run each time, so PyPI is contacted every run, not just the first.
+  Go modules are cached under `GOCACHE`/`GOPATH` after the first run.
 
 No Docker. No API keys. No external service. No `sudo`. Everything the demo
 itself generates lives under three gitignored directories in this repo
@@ -46,6 +58,15 @@ adds.
 trustvian-workspace/
 ├── trustvian/                      # the Trustvian repository
 └── trustvian-python-agent-demo/    # this repository
+```
+
+**Until the Collector's evaluation sink merges into Trustvian's `main`, the
+sibling checkout must be on `feat/otel-platform-evaluation-sink`.** That is
+the current state of Trustvian's `main` as of this writing — `main` alone
+does not carry the sink this demo depends on:
+
+```bash
+git -C ../trustvian switch feat/otel-platform-evaluation-sink
 ```
 
 The demo builds Trustvian from `../trustvian`. Set `TRUSTVIAN_DIR` to
@@ -74,20 +95,23 @@ is missing or does not carry the Collector's evaluation sink.
 ## Architecture
 
 ```text
-agent/main.py                   imports requests; knows nothing about Trustvian
-    │  real HTTP
-    ▼
-mock_services/server.py         crm/knowledge/mail/export .localhost
+┌ opentelemetry-instrument ────────────────────┐  zero-code instrumentation,
+│                                               │  wraps the agent process at
+│   agent/main.py                              │  launch — runtime only,
+│       │  real HTTP                           │  never imported by it
+│       ▼                                      │
+└───────┼───────────────────────────────────────┘
+        ▼
+mock_services/server.py     crm/knowledge/mail/export .localhost
+                             plain `python`, not instrumented — the target
+                             of the agent's HTTP calls, not their source
+        │
+        │  OTLP/HTTP  (emitted by the wrapper above, not by the mocks)
+        ▼
+Trustvian Collector          the trustvian processor
     │
-    │  (the same process, wrapped at launch)
     ▼
-opentelemetry-instrument        zero-code instrumentation, runtime only
-    │  OTLP/HTTP
-    ▼
-Trustvian Collector             the trustvian processor
-    │
-    ▼
-Trustvian Engine                real Analyze, real policy, real fingerprints
+Trustvian Engine             real Analyze, real policy, real fingerprints
     │
     ▼
 Result.DecisionRecord()
@@ -166,8 +190,9 @@ rather than treating any non-zero exit as a gate result.
 
 ## Inspecting the result
 
-Open the printed Web URL (`GET /` returns the WebUI), then **Open evaluation
-by ID**:
+Open the printed Web URL (`GET /` returns the WebUI), go to the **Open** tab,
+and under **Open by ID** enter one of these in the **Evaluation run ID**
+field and click **Open run**:
 
 ```text
 run-reference
@@ -179,6 +204,16 @@ run-candidate
 search view, by design — the control plane has no collection route, so you
 navigate by the IDs you already know. The evidence is durable in SQLite, so
 both runs remain retrievable by ID even after the demo process exits.
+
+To reopen the control plane against that same database later, without a
+fresh `make demo`:
+
+```bash
+.demo/bin/trustvian-local --state-dir .trustvian
+```
+
+The next `make demo` still resets `.trustvian/`, so treat this as a way to
+revisit existing evidence, not to accumulate it across runs.
 
 ## Smoke test
 
