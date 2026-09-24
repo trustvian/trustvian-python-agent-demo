@@ -75,7 +75,7 @@ def _payload(response, url: str) -> dict:
     the service is not there, and nothing the model chooses will change that,
     so it belongs to the caller as a fatal error.
     """
-    status = getattr(response, "status_code", 200)
+    status = response.status_code
     if status >= 400:
         raise ToolError(f"the service answered {status} for {url}")
     return response.json()
