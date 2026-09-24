@@ -32,8 +32,13 @@ compare the two runs.
 - `jq`, `curl`, GNU-compatible `bash`
 - Network access on first run, to install packages from PyPI and Go modules
 
-No Docker. No API keys. No external service. No `sudo`. Nothing is written
-outside this directory.
+No Docker. No API keys. No external service. No `sudo`. Everything the demo
+itself generates lives under three gitignored directories in this repo
+(`.demo/`, `.runtime/`, `.trustvian/`); no state is written into other
+projects. The Go and Python toolchains do write to their usual user-level
+caches outside this directory (`GOCACHE`/`GOPATH`, pip's cache) — that's the
+standard behavior of `go build` and `pip install`, not something this demo
+adds.
 
 ## Required layout
 
