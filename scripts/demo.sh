@@ -152,13 +152,17 @@ echo "  Candidate run: $CANDIDATE_RUN"
 echo
 echo "Open:"
 echo "  $API_URL/"
-echo "  then: Open evaluation by ID -> $CANDIDATE_RUN"
+echo "  then: Open tab -> Open by ID -> Evaluation run ID -> $CANDIDATE_RUN -> Open run"
 echo
 echo "Ctrl-C to stop."
 echo
 
-# The runtime stays up so the WebUI is usable. `wait` blocks until a signal,
-# and the trap installed by demo_init cleans every child on the way out.
-while true; do
-    wait || break
-done
+# The runtime stays up so the WebUI is usable. Block on the runtime process
+# specifically — a bare `wait` returns 0 immediately once the shell has no
+# children left to wait for (verified on bash 3.2.57), which would spin this
+# loop at full CPU instead of holding here. `wait "$RUNTIME_PID"` blocks
+# until that process exits (normally, or via the signal that fires the trap
+# below), and stays interruptible by Ctrl-C throughout.
+wait "$RUNTIME_PID" || true
+echo
+echo "Trustvian runtime exited."

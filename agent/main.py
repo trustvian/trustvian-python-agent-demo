@@ -98,7 +98,17 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    rounds = int(os.environ.get("SUPPORT_AGENT_ROUNDS", "3"))
+    rounds_raw = os.environ.get("SUPPORT_AGENT_ROUNDS", "3")
+    try:
+        rounds = int(rounds_raw)
+    except ValueError:
+        print(f"SUPPORT_AGENT_ROUNDS must be an integer, got {rounds_raw!r}",
+              file=sys.stderr)
+        return 2
+    if rounds < 1:
+        print(f"SUPPORT_AGENT_ROUNDS must be at least 1, got {rounds}",
+              file=sys.stderr)
+        return 2
 
     session = requests.Session()
     try:

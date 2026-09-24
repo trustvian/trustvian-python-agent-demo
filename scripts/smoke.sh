@@ -171,6 +171,12 @@ if [ "${#CHILD_PIDS[@]}" -gt 0 ]; then
     for pid in "${CHILD_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then survivors=$(( survivors + 1 )); fi
     done
+    # Every PID above has now been killed and reaped by hand. Clear the
+    # tracking array so the EXIT trap's cleanup() does not signal them a
+    # second time — exactly the recycled-PID hazard untrack() exists to
+    # prevent: by the time the trap runs, the OS may have handed one of
+    # these numbers to an unrelated process.
+    CHILD_PIDS=()
 fi
 no_survivors() { [ "$survivors" -eq 0 ]; }
 check "every spawned process exited" no_survivors

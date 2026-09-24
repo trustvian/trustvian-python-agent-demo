@@ -126,27 +126,38 @@ print(s.getsockname()[1])
 s.close()'
 }
 
-wait_tcp() {
-    local host="$1" port="$2" what="$3" timeout="${4:-30}"
-    local deadline=$(( SECONDS + timeout ))
-    while (( SECONDS < deadline )); do
-        if python3 -c 'import socket,sys
-s = socket.socket()
-s.settimeout(1)
-sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)' "$host" "$port" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    fail "timed out after ${timeout}s waiting for $what on $host:$port"
+# free_port_pair asks the OS for two DIFFERENT unused ports. Two independent
+# free_port calls each bind-then-close before the next runs, so nothing
+# reserves the first port while the second is chosen — the OS is free to
+# hand the same number back twice. This holds both sockets open at once
+# before closing either, which is what actually guarantees they differ.
+# Still advisory like free_port, for the same reason.
+free_port_pair() {
+    python3 -c 'import socket
+a = socket.socket(); a.bind(("127.0.0.1", 0))
+b = socket.socket(); b.bind(("127.0.0.1", 0))
+print(a.getsockname()[1])
+print(b.getsockname()[1])
+a.close(); b.close()'
 }
 
+# wait_http polls a URL until it answers. When pid and log are given, it also
+# notices that process dying mid-poll and fails immediately with the log's
+# tail, instead of waiting out the full timeout to report a symptom (a port
+# that never answers) instead of the cause (in the log the whole time).
 wait_http() {
-    local url="$1" what="$2" timeout="${3:-30}"
+    local url="$1" what="$2" timeout="${3:-30}" pid="${4:-}" log="${5:-}"
     local deadline=$(( SECONDS + timeout ))
     while (( SECONDS < deadline )); do
         if curl -fsS -o /dev/null --max-time 2 "$url" 2>/dev/null; then
             return 0
+        fi
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            if [ -n "$log" ]; then
+                fail "$what exited during startup:
+$(tail -20 "$log")"
+            fi
+            fail "$what exited during startup"
         fi
         sleep 0.1
     done
@@ -159,6 +170,30 @@ start_runtime() {
     # A fresh database every run. Reusing one means the second `make demo`
     # hits already_exists on creation and, worse, tries to start a run that
     # already completed — leaving a state the user cannot proceed from.
+    #
+    # But trustvian-local has its own guard against this
+    # (refuseIfRuntimeIsLive in platform/localruntime/runtime.go): it refuses
+    # to start when runtime.json names a reachable endpoint. Deleting the
+    # state directory before that guard ever runs means it can never fire —
+    # so a second `make demo` in another terminal would silently pull
+    # .trustvian/platform.db out from under the first, which keeps serving
+    # from the deleted inode with no error anywhere. Check for a live runtime
+    # ourselves, first, using the same readiness probe as below.
+    local prior_discovery="$STATE_DIR/runtime.json"
+    if [ -s "$prior_discovery" ]; then
+        local prior_url
+        prior_url="$(jq -r '.api_url // empty' "$prior_discovery" 2>/dev/null || true)"
+        if [ -n "$prior_url" ]; then
+            local prior_code
+            prior_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                    "$prior_url/v1/projects/__probe__" 2>/dev/null || true)"
+            if [ "$prior_code" = "404" ] || [ "$prior_code" = "200" ]; then
+                fail "a Trustvian demo runtime is already live at $prior_url.
+       Stop the running demo first (Ctrl-C in its terminal), then re-run."
+            fi
+        fi
+    fi
+
     rm -rf "$STATE_DIR"
 
     "$BIN_DIR/trustvian-local" --state-dir "$STATE_DIR" \
@@ -210,12 +245,16 @@ tv() { "$BIN_DIR/trustvian" "$@" --api-url "$API_URL"; }
 
 # --- mock services ----------------------------------------------------
 
+MOCK_PID=""
+
 start_mocks() {
     MOCK_PORT="$(free_port)"
     "$VENV_DIR/bin/python" "$DEMO_ROOT/mock_services/server.py" --port "$MOCK_PORT" \
         >"$RUNTIME_DIR/mocks.log" 2>&1 &
-    track "$!"
-    wait_http "http://127.0.0.1:$MOCK_PORT/healthz" "the mock services" 30
+    MOCK_PID=$!
+    track "$MOCK_PID"
+    wait_http "http://127.0.0.1:$MOCK_PORT/healthz" "the mock services" 30 \
+        "$MOCK_PID" "$RUNTIME_DIR/mocks.log"
 }
 
 # --- Trustvian Collector ---------------------------------------------
@@ -225,8 +264,15 @@ COLLECTOR_PID=""
 start_collector() {
     local run_id="$1" profile="$2"
 
-    OTLP_PORT="$(free_port)"
-    local health_port; health_port="$(free_port)"
+    # Allocated together (free_port_pair), not as two separate free_port
+    # calls: each of those binds, reads and closes before returning, so
+    # nothing reserves the first port while the second is chosen, and a
+    # collision was possible. A collision here makes the Collector exit and
+    # get reported as "exited during startup" rather than as the port clash
+    # it actually is.
+    local ports; ports="$(free_port_pair)"
+    OTLP_PORT="$(printf '%s\n' "$ports" | sed -n '1p')"
+    local health_port; health_port="$(printf '%s\n' "$ports" | sed -n '2p')"
     local config="$RUNTIME_DIR/collector-$run_id.yaml"
 
     cat >"$config" <<YAML
