@@ -35,6 +35,13 @@ TICKETS_PER_ROUND=3
 REFERENCE_ACTIONS=3   # CRM, Knowledge, Mail
 CANDIDATE_ACTIONS=4   # CRM, Knowledge, Export, Mail
 
+# The model this demo is built around. OLLAMA_MODEL overrides it for advanced
+# use; everything documented and tested here uses gemma3:4b.
+OLLAMA_MODEL_NAME="${OLLAMA_MODEL:-gemma3:4b}"
+OLLAMA_API="http://127.0.0.1:11434"
+OLLAMA_STARTED="no"
+OLLAMA_PID=""
+
 # CHILD_PIDS holds every process this script started, in start order.
 # RUNTIME_PID is tracked separately because start_runtime needs to notice its
 # own child dying during the startup poll, and bash 3.2 has no ${a[-1]}.
@@ -253,6 +260,66 @@ $(cat "$RUNTIME_DIR/trustvian-local.log")"
 # "tidy" this back to a leading flag.
 tv() { "$BIN_DIR/trustvian" "$@" --api-url "$API_URL"; }
 
+# --- Ollama -------------------------------------------------------------
+
+# ensure_ollama makes a local Ollama with the demo's model available.
+#
+# It reuses a server that is already running, and only ever stops one it
+# started itself: a developer's own Ollama, serving other work, must survive
+# this demo. That guarantee is mechanical rather than conditional — the PID is
+# tracked only on the branch that started it, so cleanup cannot reach a server
+# it did not create.
+ensure_ollama() {
+    command -v ollama >/dev/null 2>&1 || fail "ollama is not on PATH.
+       Install it from https://ollama.com/download, then re-run \`make demo\`.
+       \`make smoke\` needs no model and does not require Ollama."
+
+    if curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null; then
+        OLLAMA_STARTED="no"
+        log "reusing the Ollama server already running at $OLLAMA_API"
+    else
+        log "starting ollama serve"
+        ollama serve >"$RUNTIME_DIR/ollama.log" 2>&1 &
+        OLLAMA_PID=$!
+        OLLAMA_STARTED="yes"
+        # Tracked only on this branch. A server we did not start is never in
+        # CHILD_PIDS, so cleanup cannot signal it.
+        track "$OLLAMA_PID"
+
+        local deadline=$(( SECONDS + 60 ))
+        while (( SECONDS < deadline )); do
+            if curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null; then
+                break
+            fi
+            if ! kill -0 "$OLLAMA_PID" 2>/dev/null; then
+                fail "ollama serve exited during startup:
+$(tail -20 "$RUNTIME_DIR/ollama.log")"
+            fi
+            sleep 0.2
+        done
+        curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null \
+            || fail "the Ollama API did not become ready at $OLLAMA_API:
+$(tail -20 "$RUNTIME_DIR/ollama.log")"
+        log "ollama serve is ready"
+    fi
+
+    # `ollama list` prints one row per installed model, plus a header. Match
+    # the whole first field exactly, so gemma3:4b-something can never satisfy
+    # a request for gemma3:4b.
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$OLLAMA_MODEL_NAME"; then
+        log "$OLLAMA_MODEL_NAME is already installed"
+    else
+        echo
+        echo "  $OLLAMA_MODEL_NAME is not installed locally."
+        echo "  Pulling it with Ollama — a few GB, once."
+        echo
+        ollama pull "$OLLAMA_MODEL_NAME" \
+            || fail "failed to pull $OLLAMA_MODEL_NAME.
+       Check your network connection and that the model name is correct."
+        log "$OLLAMA_MODEL_NAME pulled"
+    fi
+}
+
 # --- mock services ----------------------------------------------------
 
 MOCK_PID=""
@@ -387,6 +454,9 @@ run_agent() {
         *)       fail "run_agent: unknown target '$target'" ;;
     esac
 
+    AGENT_STEPS_FILE="$RUNTIME_DIR/agent-$mode-summary.json"
+    rm -f "$AGENT_STEPS_FILE"
+
     # Every OTEL_* variable is supplied here, at launch. None of them is
     # referenced by the application, and none is written into its manifest.
     #
@@ -398,6 +468,9 @@ run_agent() {
     SUPPORT_AGENT_PORT="$MOCK_PORT" \
     SUPPORT_AGENT_MODE="$mode" \
     SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+    SUPPORT_AGENT_SUMMARY="$AGENT_STEPS_FILE" \
+    OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
+    PYTHONPATH="$DEMO_ROOT" \
     OTEL_SERVICE_NAME="support-agent" \
     OTEL_RESOURCE_ATTRIBUTES="deployment.environment.name=$ENVIRONMENT" \
     OTEL_SEMCONV_STABILITY_OPT_IN="http" \
@@ -411,7 +484,37 @@ run_agent() {
         "$VENV_DIR/bin/python" "$script" \
         >"$log" 2>&1 \
         || fail "the $mode agent run failed:
-$(tail -20 "$log")"
+$(tail -30 "$log")"
+}
+
+# agent_http_calls reports how many requests the last run made.
+#
+# The model decides how many turns to take, so this count cannot be computed
+# in advance — the agent reports what it actually did. A missing or
+# unparseable summary is a hard failure: waiting on an invented number would
+# turn "the agent never finished" into a timeout that appears to blame record
+# counts a minute later.
+agent_http_calls() {
+    local mode="$1"
+    [ -r "$AGENT_STEPS_FILE" ] \
+        || fail "the agent wrote no run summary at $AGENT_STEPS_FILE, so it
+       did not finish. Its log is $RUNTIME_DIR/agent-$mode.log"
+    local calls
+    calls="$(jq -r '.http_calls // empty' "$AGENT_STEPS_FILE" 2>/dev/null || true)"
+    case "$calls" in
+        ''|*[!0-9]*)
+            fail "the agent's run summary has no usable http_calls:
+$(cat "$AGENT_STEPS_FILE")" ;;
+    esac
+    printf '%s\n' "$calls"
+}
+
+# agent_steps echoes the actions the model chose, one per line. Unlike the
+# count, an unreadable summary is not fatal here: this is narration, and
+# agent_http_calls has already failed the run if the summary is missing.
+agent_steps() {
+    [ -r "$AGENT_STEPS_FILE" ] || return 0
+    jq -r '.steps[]?' "$AGENT_STEPS_FILE" 2>/dev/null || true
 }
 
 # --- evaluation runs --------------------------------------------------
@@ -477,8 +580,7 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 
 run_evaluation() {
     local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
-    local target="${6:-agent}"
-    local expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
+    local target="${6:-agent}" source="${7:-arithmetic}"
 
     tv eval create --id "$run_id" --candidate-id "$candidate_id" \
         --environment "$ENVIRONMENT" --behavioral-profile "$profile" >/dev/null
@@ -488,6 +590,16 @@ run_evaluation() {
     # refused for a pending run and the sink reads its cursor at startup.
     start_collector "$run_id" "$profile"
     run_agent "$mode" "$target"
+
+    # The fixture's activity is fixed, so arithmetic is the stronger check —
+    # it would catch a fixture that silently did less. The model-driven
+    # agent's is not, so its own report is the only honest source.
+    local expected
+    if [ "$source" = "summary" ]; then
+        expected="$(agent_http_calls "$mode")"
+    else
+        expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
+    fi
     wait_for_records "$run_id" "$expected"
 
     # Stopped before the run completes: ingest is refused once a run is
