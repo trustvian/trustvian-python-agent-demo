@@ -209,11 +209,22 @@ def main() -> int:
         # Written even on failure: the caller needs to know how much activity
         # happened before things went wrong, and `finished` tells it which
         # case this was.
+        #
+        # A failure here (bad path, unwritable directory, disk full) is
+        # reported to stderr but must not change the return code below: the
+        # run already succeeded or failed on its own terms, and the shell
+        # that launches this agent already fails loudly on its own when the
+        # summary file is missing. Rewriting the outcome here would make
+        # that diagnostic chain dishonest.
         summary_path = os.environ.get("SUPPORT_AGENT_SUMMARY")
         if summary_path:
-            with open(summary_path, "w", encoding="utf-8") as handle:
-                json.dump(build_summary(finished, session.calls, all_steps,
-                                        mode, rounds), handle)
+            try:
+                with open(summary_path, "w", encoding="utf-8") as handle:
+                    json.dump(build_summary(finished, session.calls,
+                                            all_steps, mode, rounds), handle)
+            except OSError as exc:
+                print(f"could not write summary to {summary_path}: {exc}",
+                      file=sys.stderr)
         session.close()
 
 

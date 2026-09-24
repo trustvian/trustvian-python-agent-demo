@@ -87,6 +87,16 @@ class LoopTest(unittest.TestCase):
         with self.assertRaises(agent_main.AgentError):
             run(ScriptedPlanner(forever))
 
+    # The bound must hold on the recoverable-error path too: a refused
+    # action costs a turn rather than looping for free.
+    def test_repeated_tool_errors_still_exhaust_the_bound(self):
+        forever = [{"action": "crm_lookup", "customer_id": None, "reason": "r"}
+                   for _ in range(agent_main.MAX_STEPS + 2)]
+        p = ScriptedPlanner(forever)
+        with self.assertRaises(agent_main.AgentError):
+            run(p)
+        self.assertEqual(len(p.seen), agent_main.MAX_STEPS)
+
     def test_tool_result_is_fed_back_to_the_next_turn(self):
         p = ScriptedPlanner([
             {"action": "crm_lookup", "customer_id": "42", "reason": "r"},
