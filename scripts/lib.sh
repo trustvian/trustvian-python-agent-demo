@@ -200,12 +200,12 @@ $(cat "$RUNTIME_DIR/trustvian-local.log")"
 # Every control-plane object in this demo is created through it — nothing
 # writes to the database directly.
 #
-# --api-url must trail the subcommand, not precede it: the CLI parses the
-# first token after the binary name as the subcommand itself, so
+# --api-url must come after the subcommand, not before it: the CLI parses
+# the first token after the binary name as the subcommand itself, so
 # `trustvian --api-url <url> project create ...` fails with
-# `unknown command "--api-url"`. The documented, working form is
-# `trustvian project create ... --api-url <url>` (see docs/platform-cli.md's
-# worked examples) — do not "tidy" this back to a leading flag.
+# `unknown command "--api-url"`. `trustvian project create ... --api-url
+# <url>` works, matching docs/platform-cli.md's worked examples — do not
+# "tidy" this back to a leading flag.
 tv() { "$BIN_DIR/trustvian" "$@" --api-url "$API_URL"; }
 
 # --- mock services ----------------------------------------------------
