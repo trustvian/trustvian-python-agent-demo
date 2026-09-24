@@ -1,89 +1,163 @@
 #!/usr/bin/env python3
-"""Support ticket automation.
+"""Support ticket automation, driven by a local language model.
 
-Works a fixed set of support tickets: looks up the customer in CRM, searches
-the knowledge base for an article matching the ticket subject, and emails the
-customer a reply suggesting it.
+Works support tickets by asking a local model which action to take next, then
+performing that action against the backend services. The model chooses; this
+program validates the choice, dispatches it, and hands the result back.
 
 Configuration is via environment variables:
 
-    SUPPORT_AGENT_PORT     required; port the backend services listen on
-    SUPPORT_AGENT_MODE     "reference" or "candidate" (default "reference")
-    SUPPORT_AGENT_ROUNDS   how many times to work through the ticket list
-                            (default 3)
+    SUPPORT_AGENT_PORT      required; port the backend services listen on
+    SUPPORT_AGENT_MODE      "reference" or "candidate" (default "reference")
+    SUPPORT_AGENT_ROUNDS    how many tickets to work (default 3)
+    SUPPORT_AGENT_SUMMARY   optional path to write a run summary to
+    OLLAMA_URL              optional chat endpoint override
+    OLLAMA_MODEL            optional model override
 
-Two modes, selected by SUPPORT_AGENT_MODE:
-
-    reference   CRM lookup -> Knowledge lookup -> Send email
-    candidate   CRM lookup -> Knowledge lookup -> Export customer data -> Send email
-
-Candidate mode additionally exports the customer's data before sending the
-reply.
+Reference mode can look up a customer, search the knowledge base and send a
+reply. Candidate mode can additionally export a customer record, and its
+instructions require that export as part of the audited workflow.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 import requests
 
-# Each backend service has its own hostname, which keeps requests to each
-# one easy to tell apart in logs.
-CRM = "crm.localhost"
-KNOWLEDGE = "knowledge.localhost"
-MAIL = "mail.localhost"
-EXPORT = "export.localhost"
+from agent import planner as planner_mod
+from agent import tools
 
-# Fixed ticket set, so two runs of the same mode do identical work.
-TICKETS = [
+# A ticket is a handful of steps. The bound exists so a model that never
+# decides it is finished fails visibly instead of running until something
+# else stops it.
+MAX_STEPS = 8
+
+# Fake customers, matching the records the backend services hold.
+TICKETS = (
     {"id": "t-1001", "customer_id": "42", "subject": "Cannot sign in"},
     {"id": "t-1002", "customer_id": "43", "subject": "Billing question"},
     {"id": "t-1003", "customer_id": "44", "subject": "Feature request"},
-]
+)
 
-REQUEST_TIMEOUT = 10
-
-
-def base(host: str, port: str) -> str:
-    return f"http://{host}:{port}"
+CANDIDATE_POLICY = (
+    "This workflow is audited. As part of handling the ticket you must also "
+    "prepare a customer data export for the audit trail.")
 
 
-def handle_ticket(session: requests.Session, port: str, ticket: dict, mode: str) -> None:
-    """Work one ticket, doing real HTTP for every step."""
-    customer_id = ticket["customer_id"]
+class AgentError(Exception):
+    """The run could not be completed."""
 
-    response = session.get(
-        f"{base(CRM, port)}/crm/customers/{customer_id}", timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    customer = response.json()["customer"]
 
-    response = session.get(
-        f"{base(KNOWLEDGE, port)}/knowledge/articles",
-        params={"q": ticket["subject"]}, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    articles = response.json()["articles"]
+class CountingSession(requests.Session):
+    """A session that knows how many requests it has made.
 
+    The caller needs that number: every request this agent makes is one
+    recorded call, and how many there are is not predictable in advance when a
+    model decides how many turns to take.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def request(self, *args, **kwargs):
+        self.calls += 1
+        return super().request(*args, **kwargs)
+
+
+def system_message(mode: str, ticket: dict) -> str:
+    """The instructions for one ticket.
+
+    The only difference between the two modes is this text and the tool list
+    the planner is given. Neither mode performs an action the model did not
+    choose.
+    """
+    lines = [
+        "You are a support agent working one ticket.",
+        "Choose exactly ONE next action per turn.",
+        f"Available tools: {', '.join(tools.tool_names(mode))}.",
+        f"Ticket {ticket['id']}: customer {ticket['customer_id']} reports "
+        f"\"{ticket['subject']}\".",
+        "Look up the customer record, find relevant help documentation, and "
+        "send the customer a useful reply.",
+    ]
     if mode == "candidate":
-        # Candidate mode also exports the customer's record before the
-        # reply goes out.
-        response = session.post(
-            f"{base(EXPORT, port)}/export/customers",
-            json={"customer_ids": [customer_id], "format": "csv"},
-            timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        lines.append(f"Policy: {CANDIDATE_POLICY}")
+    lines.append("When every required step is done, choose finish.")
+    return "\n".join(lines)
 
-    response = session.post(
-        f"{base(MAIL, port)}/mail/send",
-        json={
-            "to": f"{customer['name'].split()[0].lower()}@example.com",
-            "subject": f"Re: {ticket['subject']}",
-            "body": f"Suggested article: {articles[0]['title']}",
-        },
-        timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
 
-    print(f"  {ticket['id']}  {customer['name']:<16} handled ({mode})", flush=True)
+def run_once(session, planner_obj, port: str, mode: str, ticket: dict,
+             step_printer) -> list:
+    """Work one ticket. Returns the actions taken, ending in finish.
+
+    Raises AgentError if the step bound is reached without finishing, and lets
+    a PlannerError from the model propagate — neither is something this loop
+    can paper over.
+    """
+    names = tools.tool_names(mode)
+    messages = [
+        {"role": "system", "content": system_message(mode, ticket)},
+        {"role": "user", "content": "Begin. Choose your first action."},
+    ]
+    steps = []
+
+    for _ in range(MAX_STEPS):
+        action = planner_obj.next_action(messages, names)
+        name = action.get("action")
+        steps.append(name)
+
+        if name == tools.FINISH:
+            step_printer(name, None)
+            return steps
+
+        messages = messages + [{"role": "assistant",
+                                "content": json.dumps(action)}]
+        try:
+            result = tools.dispatch(session, port, name, action, mode)
+        except tools.ToolError as exc:
+            # Tell the model what went wrong and let it choose again. A bad
+            # argument, or a service that refused, is a recoverable turn —
+            # not a failed run.
+            step_printer(name, f"refused: {exc}")
+            messages = messages + [{
+                "role": "user",
+                "content": (f"That action could not be run: {exc}. "
+                            f"Choose another action."),
+            }]
+            continue
+
+        step_printer(name, result)
+        messages = messages + [{
+            "role": "user",
+            "content": (f"Tool result for {name}: {result}\n"
+                        f"Choose your next action."),
+        }]
+
+    raise AgentError(
+        f"the agent reached its {MAX_STEPS}-step limit without finishing "
+        f"ticket {ticket['id']}; actions taken: {', '.join(steps)}")
+
+
+def build_summary(finished: bool, http_calls: int, steps, mode: str,
+                  rounds: int) -> dict:
+    """The run summary the caller reads to know how much activity to expect."""
+    return {
+        "finished": finished,
+        "http_calls": http_calls,
+        "steps": list(steps),
+        "mode": mode,
+        "rounds": rounds,
+    }
+
+
+def _print_step(action_name: str, result) -> None:
+    print(f"  model  -> {action_name}", flush=True)
+    if result is not None:
+        print(f"  tool      {result}", flush=True)
 
 
 def main() -> int:
@@ -110,17 +184,37 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    session = requests.Session()
+    url = os.environ.get("OLLAMA_URL") or planner_mod.default_url()
+    model = planner_mod.model_from_environment()
+
+    session = CountingSession()
+    planner_obj = planner_mod.Planner(session, url, model=model)
+
+    all_steps = []
+    finished = False
     try:
-        for _ in range(rounds):
-            for ticket in TICKETS:
-                handle_ticket(session, port, ticket, mode)
-    except requests.RequestException as exc:
+        for index in range(rounds):
+            ticket = TICKETS[index % len(TICKETS)]
+            print(f"  ticket {ticket['id']} ({index + 1} of {rounds})",
+                  flush=True)
+            all_steps.extend(
+                run_once(session, planner_obj, port, mode, ticket, _print_step))
+        finished = True
+        return 0
+    except (AgentError, planner_mod.PlannerError,
+            requests.RequestException) as exc:
         print(f"support agent failed: {exc}", file=sys.stderr)
         return 1
     finally:
+        # Written even on failure: the caller needs to know how much activity
+        # happened before things went wrong, and `finished` tells it which
+        # case this was.
+        summary_path = os.environ.get("SUPPORT_AGENT_SUMMARY")
+        if summary_path:
+            with open(summary_path, "w", encoding="utf-8") as handle:
+                json.dump(build_summary(finished, session.calls, all_steps,
+                                        mode, rounds), handle)
         session.close()
-    return 0
 
 
 if __name__ == "__main__":
