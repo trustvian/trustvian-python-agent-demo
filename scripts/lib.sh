@@ -60,6 +60,32 @@ fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 # shell function.
 track() { CHILD_PIDS+=("$1"); }
 
+# untrack removes a PID once its owner has already killed and reaped it
+# (stop_collector, in particular, since a run's Collector is stopped long
+# before the script exits). Without this, a later cleanup would still hold
+# that PID and could signal a number the OS has since recycled to an
+# unrelated process. Rebuilds the array rather than mutating in place,
+# since bash 3.2 has no element removal; the same empty-array-under-`set -u`
+# guard applies here, because the rebuilt array may legitimately end up
+# empty.
+untrack() {
+    local target="$1"
+    if [ "${#CHILD_PIDS[@]}" -eq 0 ]; then
+        return 0
+    fi
+    local pid kept=()
+    for pid in "${CHILD_PIDS[@]}"; do
+        if [ "$pid" != "$target" ]; then
+            kept+=("$pid")
+        fi
+    done
+    if [ "${#kept[@]}" -gt 0 ]; then
+        CHILD_PIDS=("${kept[@]}")
+    else
+        CHILD_PIDS=()
+    fi
+}
+
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
@@ -181,7 +207,7 @@ start_mocks() {
     MOCK_PORT="$(free_port)"
     "$VENV_DIR/bin/python" "$DEMO_ROOT/mock_services/server.py" --port "$MOCK_PORT" \
         >"$RUNTIME_DIR/mocks.log" 2>&1 &
-    track $!
+    track "$!"
     wait_http "http://127.0.0.1:$MOCK_PORT/healthz" "the mock services" 30
 }
 
@@ -240,8 +266,23 @@ YAML
     local deadline=$(( SECONDS + 45 ))
     while (( SECONDS < deadline )); do
         if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$health_port/livez" 2>/dev/null; then
-            wait_tcp 127.0.0.1 "$OTLP_PORT" "the Collector's OTLP receiver" 15
-            return 0
+            # Checked inline, rather than via wait_tcp, so a failure here can
+            # tail the Collector's own log. free_port is advisory for both
+            # ports it handed out; /livez proves the health port bound, but
+            # the OTLP port can still lose a race to something else, and that
+            # is exactly the failure a bare wait_tcp timeout would hide.
+            local otlp_deadline=$(( SECONDS + 15 ))
+            while (( SECONDS < otlp_deadline )); do
+                if python3 -c 'import socket,sys
+s = socket.socket()
+s.settimeout(1)
+sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)' 127.0.0.1 "$OTLP_PORT" 2>/dev/null; then
+                    return 0
+                fi
+                sleep 0.1
+            done
+            fail "the Collector's OTLP receiver never bound on 127.0.0.1:$OTLP_PORT:
+$(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
         fi
         if ! kill -0 "$COLLECTOR_PID" 2>/dev/null; then
             fail "the Trustvian Collector exited during startup:
@@ -257,6 +298,7 @@ stop_collector() {
     [ -n "$COLLECTOR_PID" ] || return 0
     kill "$COLLECTOR_PID" 2>/dev/null || true
     wait "$COLLECTOR_PID" 2>/dev/null || true
+    untrack "$COLLECTOR_PID"
     COLLECTOR_PID=""
 }
 
@@ -323,12 +365,34 @@ wait_for_records() {
     local run_id="$1" want="$2" timeout="${3:-60}"
     local deadline=$(( SECONDS + timeout )) got=0
     while (( SECONDS < deadline )); do
+        # If the Collector has died, no further records are ever coming, so
+        # this is a hard failure rather than something the timeout should
+        # discover 60 seconds later — the same liveness check start_runtime
+        # and start_collector already make during their own poll loops.
+        if [ -n "$COLLECTOR_PID" ] && ! kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+            fail "the Trustvian Collector exited while waiting for run $run_id's records:
+$(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
+        fi
+
         got="$(record_count "$run_id")"
-        if [ "$got" -ge "$want" ] 2>/dev/null; then return 0; fi
+        # record_count can print "null" (a missing field, schema drift) and
+        # still exit 0 — nothing about that looks like a failure until it is
+        # used arithmetically below. Fail on it immediately, naming what
+        # came back, rather than let a bad value poll silently to the full
+        # timeout.
+        case "$got" in
+            ''|*[!0-9]*)
+                fail "run $run_id's record count was not a number: got '${got}'
+       Collector log:
+$(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
+                ;;
+        esac
+        if [ "$got" -ge "$want" ]; then return 0; fi
         sleep 0.2
     done
     fail "run $run_id holds $got records after ${timeout}s, expected at least $want
-       Collector log: $RUNTIME_DIR/collector-$run_id.log"
+       Collector log:
+$(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 }
 
 run_evaluation() {
