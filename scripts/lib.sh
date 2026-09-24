@@ -196,6 +196,16 @@ start_runtime() {
 
     rm -rf "$STATE_DIR"
 
+    # The pending-state file and the control-plane evidence it reconciles
+    # against share exactly one lifetime. Run ids are fixed strings
+    # (run-reference, run-candidate) reused across invocations, so a stale
+    # pending file left behind here would describe a run that no longer
+    # exists once the control plane above is wiped — and a fresh run reusing
+    # that id would inherit a predecessor's unsettled record on its first
+    # Collector startup. Discarding the state dir without also discarding
+    # these notes would defeat the fix above, not just leave it incomplete.
+    rm -f "$RUNTIME_DIR"/collector-pending-*.json
+
     "$BIN_DIR/trustvian-local" --state-dir "$STATE_DIR" \
         >"$RUNTIME_DIR/trustvian-local.log" 2>&1 &
     RUNTIME_PID=$!
@@ -295,6 +305,13 @@ processors:
       run_id: $run_id
       behavioral_profile: $profile
       required: true
+      # Holds the single record that may be in flight, so a Collector that
+      # dies between recording evidence in the control plane and applying
+      # that record's learning can tell on restart which of the two already
+      # happened. One file per run: the sink refuses to start against a
+      # note naming a different run rather than discarding an unsettled
+      # record.
+      pending_state_path: $RUNTIME_DIR/collector-pending-$run_id.json
 
 exporters:
   debug:
@@ -358,7 +375,17 @@ stop_collector() {
 # --- the agent, under runtime instrumentation ------------------------
 
 run_agent() {
-    local mode="$1" log="$RUNTIME_DIR/agent-$mode.log"
+    local mode="$1" target="${2:-agent}" log="$RUNTIME_DIR/agent-$mode.log"
+
+    # The deterministic fixture and the model-driven agent take exactly the
+    # same environment and produce the same kind of activity. Which one runs
+    # is the caller's choice, not a mode the application knows about.
+    local script
+    case "$target" in
+        agent)   script="$DEMO_ROOT/agent/main.py" ;;
+        fixture) script="$DEMO_ROOT/fixtures/deterministic_agent.py" ;;
+        *)       fail "run_agent: unknown target '$target'" ;;
+    esac
 
     # Every OTEL_* variable is supplied here, at launch. None of them is
     # referenced by the application, and none is written into its manifest.
@@ -381,7 +408,7 @@ run_agent() {
     OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$OTLP_PORT" \
     OTEL_BSP_SCHEDULE_DELAY="200" \
         "$VENV_DIR/bin/opentelemetry-instrument" \
-        "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py" \
+        "$VENV_DIR/bin/python" "$script" \
         >"$log" 2>&1 \
         || fail "the $mode agent run failed:
 $(tail -20 "$log")"
@@ -450,6 +477,7 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 
 run_evaluation() {
     local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
+    local target="${6:-agent}"
     local expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
 
     tv eval create --id "$run_id" --candidate-id "$candidate_id" \
@@ -459,7 +487,7 @@ run_evaluation() {
     # The Collector is started after the run is running, because ingest is
     # refused for a pending run and the sink reads its cursor at startup.
     start_collector "$run_id" "$profile"
-    run_agent "$mode"
+    run_agent "$mode" "$target"
     wait_for_records "$run_id" "$expected"
 
     # Stopped before the run completes: ingest is refused once a run is
