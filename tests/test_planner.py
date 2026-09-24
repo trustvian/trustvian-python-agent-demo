@@ -14,6 +14,17 @@ import requests
 from agent import planner
 
 
+class RawBody:
+    """Wraps a reply that should be sent as-is, not inside a message envelope.
+
+    Lets a test script a 200 response with a body shaped unlike Ollama's
+    normal `{"message": {...}}` reply, e.g. one missing the `message` key.
+    """
+
+    def __init__(self, body):
+        self.body = body
+
+
 class StubOllama:
     """A local stand-in for Ollama's /api/chat, scripted per test."""
 
@@ -35,8 +46,11 @@ class StubOllama:
                     self.end_headers()
                     return
                 content = outer.replies.pop(0) if outer.replies else "{}"
-                body = json.dumps({"message": {"role": "assistant",
-                                               "content": content}}).encode()
+                if isinstance(content, RawBody):
+                    body = json.dumps(content.body).encode()
+                else:
+                    body = json.dumps({"message": {"role": "assistant",
+                                                   "content": content}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -175,6 +189,17 @@ class NextActionTest(unittest.TestCase):
             planner.Planner(self.session, stub.url).next_action(
                 [{"role": "user", "content": "go"}], REF_TOOLS)
         self.assertIn("Ollama", str(ctx.exception))
+        self.assertEqual(len(stub.requests), 1)
+
+    # A 200 with an unusable body is a malformed reply, not a transport
+    # failure — but it must still become a PlannerError, not a raw KeyError,
+    # and it must not be retried as if a correction message could fix it.
+    def test_a_response_missing_the_message_field_is_a_planner_error(self):
+        stub = StubOllama([RawBody({"no_message_here": True})])
+        self.addCleanup(stub.close)
+        with self.assertRaises(planner.PlannerError):
+            planner.Planner(self.session, stub.url).next_action(
+                [{"role": "user", "content": "go"}], REF_TOOLS)
         self.assertEqual(len(stub.requests), 1)
 
     def test_correction_message_is_appended_for_the_retry(self):

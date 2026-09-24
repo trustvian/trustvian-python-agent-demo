@@ -1,9 +1,10 @@
 """Asks the local model for the next action, and refuses anything else.
 
 The model is constrained twice: the request carries a JSON Schema listing the
-exact actions available this turn, and the reply is validated again here
-before the caller sees it. The schema is a strong hint, not a guarantee, so
-the second check is not redundant.
+exact actions available this turn, and the reply is checked again here before
+the caller sees it — that it parses as JSON, is an object, and names an
+action inside this turn's allowlist. The schema is a strong hint, not a
+guarantee, so the second check is not redundant.
 
 Nothing here dispatches anything. This module's whole output is a validated
 action dictionary.
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import requests
 
 DEFAULT_MODEL = "gemma3:4b"
 OLLAMA_HOST = "ollama.localhost"
@@ -76,6 +79,13 @@ class Planner:
     def next_action(self, messages, tool_names) -> dict:
         """Ask for one action and return it validated.
 
+        What is re-checked here is that the reply parses as JSON, is an
+        object, and names an action inside `tool_names` plus finish. The
+        schema also asks the model for a `reason`, but nothing downstream
+        consumes it, so its presence is not enforced on the way back —
+        rejecting a reply over an unused field would spend a retry for no
+        behavioural gain.
+
         `messages` is not modified: a correction for a malformed reply is
         appended to a local copy, so a caller's conversation never silently
         grows the agent's own error handling.
@@ -128,7 +138,9 @@ class Planner:
 
         A correction message can fix a malformed reply; it cannot fix a
         refused connection or a 500, and retrying those with a politer prompt
-        would turn one clear error into three confusing ones.
+        would turn one clear error into three confusing ones. That failure is
+        caught narrowly, so a bug in this method is not misreported as an
+        Ollama problem.
         """
         payload = {
             "model": self.model,
@@ -141,6 +153,10 @@ class Planner:
             response = self.session.post(
                 self.url, json=payload, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            return response.json()["message"]["content"]
-        except Exception as exc:
+        except requests.exceptions.RequestException as exc:
             raise PlannerError(f"Ollama request failed: {exc}") from exc
+
+        try:
+            return response.json()["message"]["content"]
+        except (KeyError, ValueError, TypeError) as exc:
+            raise PlannerError(f"Ollama reply was not usable: {exc}") from exc
