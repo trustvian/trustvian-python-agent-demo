@@ -305,8 +305,10 @@ $(tail -20 "$RUNTIME_DIR/ollama.log")"
 
     # `ollama list` prints one row per installed model, plus a header. Match
     # the whole first field exactly, so gemma3:4b-something can never satisfy
-    # a request for gemma3:4b.
-    if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$OLLAMA_MODEL_NAME"; then
+    # a request for gemma3:4b. -F treats the model name as a fixed string, not
+    # a regex — a dotted tag like llama3.2:latest is an ordinary model name,
+    # not a wildcard pattern.
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qxF "$OLLAMA_MODEL_NAME"; then
         log "$OLLAMA_MODEL_NAME is already installed"
     else
         echo
@@ -581,6 +583,16 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 run_evaluation() {
     local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
     local target="${6:-agent}" source="${7:-arithmetic}"
+
+    # A silent fallback here would defeat the point of this task: a typo'd or
+    # mis-cased source would quietly take the arithmetic branch and predict
+    # the wrong expected count for a model-driven run — the exact failure the
+    # summary path exists to remove, reintroduced one layer up. Fail before
+    # any run is created, not after the agent has already executed.
+    case "$source" in
+        summary|arithmetic) ;;
+        *) fail "run_evaluation: unknown expected-count source '$source'" ;;
+    esac
 
     tv eval create --id "$run_id" --candidate-id "$candidate_id" \
         --environment "$ENVIRONMENT" --behavioral-profile "$profile" >/dev/null
