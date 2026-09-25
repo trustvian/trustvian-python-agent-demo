@@ -94,8 +94,10 @@ class DispatchTest(unittest.TestCase):
         self.session.get.assert_not_called()
         self.session.post.assert_not_called()
 
-    # Review Focus 4. Every scalar is nullable in the schema, so a tool can
-    # arrive with nothing to act on.
+    # Review Focus 4. The dispatcher validates independently of the schema —
+    # it is the right place to refuse a missing argument regardless of what
+    # the schema currently requires, so a tool can still arrive here with
+    # nothing to act on.
     def test_dispatch_rejects_missing_required_argument(self):
         with self.assertRaises(tools.ToolError):
             tools.dispatch(self.session, "9999", "crm_lookup",

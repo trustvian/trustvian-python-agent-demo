@@ -111,7 +111,7 @@ class Planner:
             content = self._chat(attempt, schema)
             try:
                 action = json.loads(content)
-            except ValueError:
+            except (ValueError, TypeError):
                 problem = "the reply was not valid JSON"
                 attempt = attempt + [{
                     "role": "user",
@@ -130,7 +130,7 @@ class Planner:
                 continue
 
             name = action.get("action")
-            if name not in allowed:
+            if not isinstance(name, str) or name not in allowed:
                 problem = f"{name!r} is not an available action"
                 attempt = attempt + [{
                     "role": "user",

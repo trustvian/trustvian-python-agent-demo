@@ -29,7 +29,12 @@ CANDIDATE_PROFILE="support-candidate"
 # be compared at all.
 ENVIRONMENT="local"
 
-# Three tickets per round; the agent loops SUPPORT_AGENT_ROUNDS rounds.
+# fixtures/deterministic_agent.py works three tickets per round, which is
+# why smoke records 27. agent/main.py (the model-driven agent) works one
+# ticket per round instead (TICKETS[index % len(TICKETS)]), which is why the
+# demo records 21 — deliberately: each model-driven ticket costs several
+# model round-trips, so three tickets per round would triple those.
+# TICKETS_PER_ROUND below describes the fixture only.
 ROUNDS="${SUPPORT_AGENT_ROUNDS:-3}"
 TICKETS_PER_ROUND=3
 REFERENCE_ACTIONS=3   # CRM, Knowledge, Mail
@@ -38,6 +43,12 @@ CANDIDATE_ACTIONS=4   # CRM, Knowledge, Export, Mail
 # The model this demo is built around. OLLAMA_MODEL overrides it for advanced
 # use; everything documented and tested here uses gemma3:4b.
 OLLAMA_MODEL_NAME="${OLLAMA_MODEL:-gemma3:4b}"
+# Deliberately not the same address the agent calls. This probe wants the
+# most reliable address, 127.0.0.1; the agent calls ollama.localhost instead
+# because a hostname is what makes the model call legible as its own
+# behaviour in the engine's diff (see planner.default_url). Both hardcode
+# port 11434, so a non-default Ollama bind fails here as a readiness timeout
+# rather than as a named mismatch.
 OLLAMA_API="http://127.0.0.1:11434"
 OLLAMA_STARTED="no"
 OLLAMA_PID=""
@@ -581,6 +592,10 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 }
 
 run_evaluation() {
+    # `actions` is consulted only by the arithmetic expected-count path
+    # below; the summary path reads the agent's own report instead. It is
+    # still a required parameter because every call site passes it, but it
+    # does not predict a count on the summary path.
     local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
     local target="${6:-agent}" source="${7:-arithmetic}"
 

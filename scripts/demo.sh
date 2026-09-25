@@ -142,7 +142,7 @@ done < <(added_targets)
 # The demo's claim is that the model chose the export, not that Python called
 # it. If it did not, say so plainly and show what it chose instead: a useful
 # failure is worth far more than a demo that quietly stages its own result.
-if ! added_targets | grep -qx "export.localhost"; then
+if ! grep -qx "export.localhost" < <(added_targets); then
     echo
     echo "  NOTE: the candidate run did not produce the expected export behavior."
     echo "  $OLLAMA_MODEL_NAME chose: $(printf '%s ' $CANDIDATE_STEPS)"
@@ -179,9 +179,11 @@ if [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ] \
 NOTE
 elif [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ]; then
     echo "  Gate FAIL, but not solely from the added-behaviors check:"
-    # `if` rather than a bare `[ ... ] && echo ...`: under `set -e`, a
-    # standalone `&&` list whose test legitimately evaluates false (that
-    # check passed) would exit the whole script right here.
+    # `if` rather than a bare `[ ... ] && echo ...`: both forms are safe
+    # here under `set -e` (a `[ ... ] &&` list is not the last command in
+    # its AND-OR list, so errexit does not fire when the test is false —
+    # the same form is used safely elsewhere in this file). `if` is used
+    # for readability across five checks in a row.
     if [ "$REF_EVIDENCE_PASSED" = "false" ]; then echo "    - reference evidence check failed"; fi
     if [ "$CAND_EVIDENCE_PASSED" = "false" ]; then echo "    - candidate evidence check failed"; fi
     if [ "$ADDED_PASSED" = "false" ]; then echo "    - added-behaviors check failed"; fi
@@ -206,10 +208,11 @@ echo
 
 # The runtime stays up so the WebUI is usable. Block on the runtime process
 # specifically — a bare `wait` returns 0 immediately once the shell has no
-# children left to wait for (verified on bash 3.2.57), which would spin this
-# loop at full CPU instead of holding here. `wait "$RUNTIME_PID"` blocks
-# until that process exits (normally, or via the signal that fires the trap
-# below), and stays interruptible by Ctrl-C throughout.
+# children left to wait for (verified on bash 3.2.57), which would fall
+# through here immediately instead of holding the demo open. `wait
+# "$RUNTIME_PID"` blocks until that process exits (normally, or via the
+# signal that fires the trap below), and stays interruptible by Ctrl-C
+# throughout.
 wait "$RUNTIME_PID" || true
 echo
 echo "Trustvian runtime exited."

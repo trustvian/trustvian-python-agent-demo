@@ -112,8 +112,13 @@ consuming this command should too.
 
 ```text
                     records (ref / cand)   behaviors (ref / cand)   added
-make demo (model)        21 / 27                   4 / 5             1
+make demo (model)        21 / 27 *                 4 / 5 *           1
 make smoke (fixture)     27 / 36                   3 / 4             1
+
+* In a verified run. The model decides how many turns to take, so these are
+  observed figures, not a guarantee — a different run can produce different
+  record counts, though the behavior set is stable at gemma3:4b's
+  temperature 0.
 ```
 
 Both show the same gate outcome — one added behavior, `Gate: FAIL`, `eval
@@ -308,10 +313,15 @@ make smoke
 ```
 
 Non-interactive, exits zero only when every guarantee holds — 15 checks in
-total, starting with the application-isolation check (`agent/main.py`,
-`agent/planner.py`, `agent/tools.py` and `agent/requirements.txt` mention
-neither Trustvian nor OpenTelemetry) and ending with confirming that every
-process the script spawned has exited. It runs `fixtures/deterministic_agent.py`
+total, starting with two isolation checks and ending with confirming that
+every process the script spawned has exited. The first isolation check scans
+five files (`agent/main.py`, `agent/planner.py`, `agent/tools.py`,
+`agent/__init__.py` and `fixtures/deterministic_agent.py`) for any mention
+of Trustvian or OpenTelemetry, anywhere. The second, narrower check covers
+`agent/requirements.txt` separately, and only flags a line that *starts*
+with `trustvian` or `opentelemetry` — i.e. a declared dependency — because
+that file deliberately does name both, in comments explaining why neither is
+installed. It runs `fixtures/deterministic_agent.py`
 instead of the model-driven agent, so it needs no Ollama and its record and
 behavior counts are exact, asserted values rather than model-dependent ones.
 

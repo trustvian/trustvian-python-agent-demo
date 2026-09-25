@@ -1,6 +1,6 @@
 # Local AI agent evaluation with Ollama `gemma3:4b`
 
-Status: specified
+Status: shipped
 
 ## Objective
 
@@ -114,19 +114,28 @@ for the model to invent structure the dispatcher then has to interpret.
       "enum": ["crm_lookup", "knowledge_search", "export_customer",
                "send_email", "finish"]
     },
-    "customer_id":   {"type": ["string", "null"]},
-    "query":         {"type": ["string", "null"]},
-    "email_subject": {"type": ["string", "null"]},
-    "email_body":    {"type": ["string", "null"]},
+    "customer_id":   {"type": "string"},
+    "query":         {"type": "string"},
+    "email_subject": {"type": "string"},
+    "email_body":    {"type": "string"},
     "reason":        {"type": "string"}
   },
-  "required": ["action", "reason"]
+  "required": ["action", "customer_id", "query", "email_subject",
+               "email_body", "reason"]
 }
 ```
 
 The enum is narrowed per mode: the reference agent's schema omits
 `export_customer` entirely, so the tool is absent from the model's vocabulary
 rather than merely refused after the fact.
+
+The four scalar fields were originally optional (`["string", "null"]`, not
+required), so a tool could simply omit what it does not need. Measured
+against the live model, `gemma3:4b` at `temperature: 0` answered an optional
+field with `null` every time rather than filling in the one value its chosen
+action actually needed, so an action was picked and then refused for want of
+an argument until the step bound was exhausted. Documenting the fields in the
+prompt did not fix it; only making the schema require them did.
 
 Request shape:
 
@@ -266,7 +275,7 @@ the default, the tests, the README examples and the expected experience all use
 
 The current deterministic agent moves to `fixtures/deterministic_agent.py`
 unchanged in behaviour. `make smoke` keeps its exact-count assertions and its
-14 checks, and CI keeps running `make smoke` alone. **CI never depends on Gemma
+15 checks, and CI keeps running `make smoke` alone. **CI never depends on Gemma
 choosing the expected sequence.**
 
 This split is the point: the interactive demo proves the product story, and the
@@ -369,8 +378,11 @@ Trustvian or OpenTelemetry mention in the application source, and neither in
 7. `make smoke` passes with no Ollama present and remains deterministic.
 8. CI runs `make smoke` only, with no Ollama installation or model download.
 9. No arbitrary sleep is used as a readiness primitive.
-10. The demo fails with a useful diagnostic if the candidate run does not produce
-    the export behaviour. Nothing is injected afterwards to force the result.
+10. If the candidate run does not produce the export behaviour, the demo
+    reports that prominently — a note naming what the model chose instead —
+    rather than exiting non-zero, and then holds for Ctrl-C as an
+    interactive demo should. Nothing is injected afterwards to force the
+    result.
 
 ## Non-goals
 

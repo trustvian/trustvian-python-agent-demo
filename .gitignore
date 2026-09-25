@@ -3,6 +3,9 @@
 .runtime/
 .trustvian/
 
+# This workflow's scratch artifacts.
+.superpowers/
+
 # Python
 __pycache__/
 *.py[cod]

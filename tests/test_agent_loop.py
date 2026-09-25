@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent import main as agent_main
 from agent import planner as planner_mod
+from agent import tools as tools_mod
 
 
 class ScriptedPlanner:
@@ -186,11 +187,24 @@ class DefaultsTest(unittest.TestCase):
     def test_counting_session_starts_at_zero(self):
         self.assertEqual(agent_main.CountingSession().calls, 0)
 
+    # tools.FINISH and planner.FINISH are deliberately defined separately —
+    # the planner must not import the dispatcher — so nothing enforces this
+    # at import time. A drift here would make the planner accept a value the
+    # loop (agent_main.run_once, which checks against tools.FINISH) never
+    # recognises as terminal, burning every step to an AgentError instead of
+    # ending the run.
+    def test_the_two_finish_constants_stay_in_sync(self):
+        self.assertEqual(tools_mod.FINISH, planner_mod.FINISH)
+
     def test_no_dynamic_execution_anywhere_in_the_agent(self):
-        source = Path(agent_main.__file__).read_text()
-        for forbidden in ("eval(", "exec(", "__import__", "subprocess",
-                          "os.system"):
-            self.assertNotIn(forbidden, source)
+        # The name claims the whole agent, so it scans every module of it —
+        # not just main.py, which is where the loop lives but not the only
+        # place code could sneak in a dynamic call.
+        for module in (agent_main, planner_mod, tools_mod):
+            source = Path(module.__file__).read_text()
+            for forbidden in ("eval(", "exec(", "__import__", "subprocess",
+                              "os.system"):
+                self.assertNotIn(forbidden, source, msg=module.__file__)
 
 
 if __name__ == "__main__":

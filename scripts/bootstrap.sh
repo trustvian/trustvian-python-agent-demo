@@ -31,18 +31,18 @@ log "go, python3, jq, curl"
 
 # Resolution is checked here rather than discovered as a confusing
 # NameResolutionError inside the agent, thirty seconds into a demo.
-for host in crm.localhost knowledge.localhost mail.localhost export.localhost; do
+for host in crm.localhost knowledge.localhost mail.localhost export.localhost ollama.localhost; do
     python3 - "$host" <<'PY' || fail "cannot resolve *.localhost hostnames on this machine.
        This demo addresses its mock services by name so each one has a distinct
        identity in telemetry. RFC 6761 reserves .localhost for loopback and
        macOS and systemd Linux both resolve it, but a hardened resolver or a
        minimal container image may not.
-       Workaround: add the four names to /etc/hosts pointing at 127.0.0.1."
+       Workaround: add the five names to /etc/hosts pointing at 127.0.0.1."
 import socket, sys
 socket.getaddrinfo(sys.argv[1], 80, proto=socket.IPPROTO_TCP)
 PY
 done
-log "crm/knowledge/mail/export .localhost all resolve to loopback"
+log "crm/knowledge/mail/export/ollama .localhost all resolve to loopback"
 
 # ---------------------------------------------------------------------
 # 2. The sibling Trustvian checkout

@@ -219,6 +219,28 @@ class NextActionTest(unittest.TestCase):
         planner.Planner(self.session, stub.url).next_action(messages, REF_TOOLS)
         self.assertEqual(len(messages), 1)
 
+    # A 200 whose message.content is null passes _chat's own indexing (the
+    # key is present), then json.loads(None) raises TypeError, which must
+    # become a PlannerError, not escape the retry loop.
+    def test_a_null_content_is_a_planner_error(self):
+        stub = StubOllama(
+            [RawBody({"message": {"role": "assistant", "content": None}})] * 3)
+        self.addCleanup(stub.close)
+        with self.assertRaises(planner.PlannerError):
+            planner.Planner(self.session, stub.url).next_action(
+                [{"role": "user", "content": "go"}], REF_TOOLS)
+
+    # An action that is a list rather than a string must not reach the `in`
+    # check against the allowed set, which raises TypeError on an unhashable
+    # type instead of being rejected as a malformed reply.
+    def test_a_non_string_action_is_rejected(self):
+        stub = StubOllama(
+            ['{"action": ["finish"], "reason": "x"}'] * 3)
+        self.addCleanup(stub.close)
+        with self.assertRaises(planner.PlannerError):
+            planner.Planner(self.session, stub.url).next_action(
+                [{"role": "user", "content": "go"}], REF_TOOLS)
+
 
 if __name__ == "__main__":
     unittest.main()

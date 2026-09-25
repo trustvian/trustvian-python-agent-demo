@@ -207,7 +207,13 @@ def main() -> int:
         finished = True
         return 0
     except (AgentError, planner_mod.PlannerError,
-            requests.RequestException) as exc:
+            requests.RequestException,
+            # tools.dispatch indexes into response bodies (["customer"],
+            # ["articles"], ["exported"]), so a 200 response with an
+            # unexpected shape would otherwise escape as a traceback
+            # instead of this clean failure line and the run summary the
+            # launching shell depends on.
+            KeyError, IndexError, TypeError) as exc:
         print(f"support agent failed: {exc}", file=sys.stderr)
         return 1
     finally:
