@@ -52,18 +52,30 @@ def action_schema(tool_names) -> dict:
     and every other field is a bounded scalar. There is deliberately no open
     arguments object: an open map is a place for the model to invent structure
     the dispatcher then has to interpret.
+
+    The four scalar fields are required strings, not optional ones, even
+    though a given action only reads some of them. They used to be nullable
+    so a tool could simply omit what it does not need — but measured against
+    the real model, a small model at temperature 0 answers an optional field
+    with `null` every time, rather than filling in the one its chosen action
+    actually needs. The action then gets refused for want of an argument it
+    plainly had available (the ticket's own customer id, say), and the run
+    never recovers. Requiring the field costs the model a throwaway value on
+    an action that ignores it, which nothing downstream reads — and that is
+    cheaper than an action that can never run.
     """
     return {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(tool_names) + [FINISH]},
-            "customer_id": {"type": ["string", "null"]},
-            "query": {"type": ["string", "null"]},
-            "email_subject": {"type": ["string", "null"]},
-            "email_body": {"type": ["string", "null"]},
+            "customer_id": {"type": "string"},
+            "query": {"type": "string"},
+            "email_subject": {"type": "string"},
+            "email_body": {"type": "string"},
             "reason": {"type": "string"},
         },
-        "required": ["action", "reason"],
+        "required": ["action", "customer_id", "query", "email_subject",
+                     "email_body", "reason"],
     }
 
 

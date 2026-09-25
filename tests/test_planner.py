@@ -100,9 +100,10 @@ class SchemaTest(unittest.TestCase):
             {"action", "customer_id", "query", "email_subject", "email_body",
              "reason"})
 
-    def test_action_and_reason_are_required(self):
+    def test_all_scalar_fields_are_required(self):
         self.assertEqual(set(planner.action_schema(REF_TOOLS)["required"]),
-                         {"action", "reason"})
+                         {"action", "customer_id", "query", "email_subject",
+                          "email_body", "reason"})
 
 
 class DefaultsTest(unittest.TestCase):

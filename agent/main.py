@@ -119,14 +119,19 @@ def run_once(session, planner_obj, port: str, mode: str, ticket: dict,
         try:
             result = tools.dispatch(session, port, name, action, mode)
         except tools.ToolError as exc:
-            # Tell the model what went wrong and let it choose again. A bad
-            # argument, or a service that refused, is a recoverable turn —
-            # not a failed run.
+            # Tell the model what went wrong and ask it to retry the same
+            # action with the missing piece supplied — a bad or absent
+            # argument usually means the action was right and the argument
+            # was not, not that a different action is needed. The model
+            # remains free to choose differently if the action really was
+            # wrong; this is a recoverable turn, not a failed run.
             step_printer(name, f"refused: {exc}")
             messages = messages + [{
                 "role": "user",
-                "content": (f"That action could not be run: {exc}. "
-                            f"Choose another action."),
+                "content": (f"That action could not be run: {exc}. Retry the "
+                            f"same action with the missing information "
+                            f"supplied, or choose a different action if this "
+                            f"one was wrong."),
             }]
             continue
 
