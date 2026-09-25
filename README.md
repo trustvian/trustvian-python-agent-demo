@@ -4,26 +4,51 @@
 make demo
 ```
 
-Run a real local Python agent with Ollama `gemma3:4b` and see how its
-behavior changed before you ship it.
+Run a real local agent, and watch Trustvian show how its behavior changed
+before you ship it.
 
-**The agent imports neither Trustvian nor OpenTelemetry.** OpenTelemetry is
-attached at runtime; Trustvian observes the resulting telemetry.
+The agent picks each next action by asking **Ollama `gemma3:4b`** running on
+your machine, then performs that action as a real HTTP call. Trustvian watches
+the resulting traffic. **The application imports neither Trustvian nor
+OpenTelemetry** — instrumentation is attached at runtime.
+
+## The journey
+
+```text
+1. Ollama gemma3:4b starts locally (or an already-running one is reused).
+2. Trustvian starts locally.
+3. The demo prints the Live view URL and waits.
+4. You open it and press ENTER.
+5. The reference agent runs — the model chooses each action, and the
+   observations arrive while you watch.
+6. You press ENTER again; the candidate runs, and it can reach one more
+   service: export.localhost.
+7. Trustvian shows the new behavior.
+8. The comparison reports the behavioral difference and the gate result.
+```
+
+Trustvian keeps running afterwards so you can look around. Ctrl-C stops it.
+
+```text
+local Python agent
+    -> local Ollama, gemma3:4b        the model chooses the next action
+    -> real local HTTP tool calls
+    -> runtime OpenTelemetry instrumentation
+    -> Trustvian Collector
+    -> Trustvian Engine
+    -> local Trustvian control plane
+    -> Live WebUI
+```
 
 ## What this demonstrates
 
-The application is a small support-ticket agent. On each ticket it asks a
-local model, turn by turn, which action to take next; this program validates
-the model's choice, dispatches it against a real backend service, and hands
-the result back until the model decides it is finished. In `reference` mode
-the model can look up a customer, search the knowledge base and send a reply.
-In `candidate` mode it can additionally export a customer's data, and its
-instructions require that export as part of an audited workflow.
+An existing Python application can be observed by Trustvian without being
+changed, and a behavioral change between two versions of it shows up as a
+difference Trustvian can gate on.
 
-The flow: agent → Ollama `gemma3:4b` → real tool calls → OpenTelemetry →
-Trustvian → behavioral diff. `make demo` runs both modes, lets OpenTelemetry
-capture the telemetry each one emits, and asks Trustvian to compare the two
-runs.
+The agent is genuinely agentic: one bounded loop, one model call per turn, and
+the model owns action selection. The workflow order is not written in Python —
+see [Reference vs candidate](#reference-vs-candidate).
 
 ## Prerequisites
 
@@ -169,35 +194,57 @@ it has not hung.
 3. Starts the mock backend services (`mock_services/server.py`) on
    `crm.localhost`, `knowledge.localhost`, `mail.localhost` and
    `export.localhost`.
-4. Creates the project, agent and two candidates through the real
-   `trustvian` CLI.
-5. Runs the `reference` evaluation: starts a Trustvian Collector, launches
-   the agent under `opentelemetry-instrument` in reference mode — the model
-   chooses each action — waits for every record to land, then completes the
-   run.
-6. Runs the `candidate` evaluation the same way, in candidate mode.
-7. Calls `trustvian eval compare` on the two runs and prints the result.
-8. Leaves the control plane running so the WebUI can be inspected, until
+4. Creates the project, agent, environment and two candidates through the real
+   `trustvian` CLI. The hierarchy exists before any telemetry does — ingest
+   into a run that does not exist, or one that is not running, is refused.
+5. Prints the WebUI URL, reports whether this build serves the zero-input Live
+   view, and **waits for ENTER** so the browser is open before anything is
+   produced.
+6. Runs the `reference` evaluation: creates and starts the run, starts a
+   Trustvian Collector for it, launches the agent under
+   `opentelemetry-instrument` in reference mode — the model chooses each
+   action — waits for every record to land, then completes the run.
+7. **Waits for ENTER again**, then runs the `candidate` evaluation the same
+   way, in candidate mode, where the model may also reach `export.localhost`.
+8. Calls `trustvian eval compare` on the two runs and prints the behavioral
+   diff and gate result.
+9. Leaves the control plane running so the WebUI can be inspected, until
    Ctrl-C.
+
+The two pauses are presentation pacing at the orchestration layer. Nothing
+inside the agent is delayed, and no observation is synthesised — the arrival
+order you see in the WebUI is the order the model actually produced. With stdin
+not a terminal the pauses report that and continue, so the script stays usable
+unattended.
+
+### Waiting on Trustvian task 074
+
+The zero-input Live view — open `/` and see the active agent with nothing to
+type — is Trustvian task 074, **specified but not yet implemented**. This demo
+is built for it and detects it at runtime by asking the control plane whether it
+serves the collection routes 074 adds (`GET /v1/projects` and the three below
+it). Until it lands, `make demo` says so plainly and prints the run IDs for
+by-ID navigation instead. Nothing here fakes the Live behavior, and no browser
+automation is used to work around its absence.
 
 ## Inspecting the result
 
-Open the printed Web URL (`GET /` returns the WebUI), go to the **Open** tab,
-and under **Open by ID** enter one of these in the **Evaluation run ID**
-field and click **Open run**:
+The demo prints the WebUI URL and pauses so you can open it before any
+telemetry exists — the point is to watch observations arrive, not to find them
+already there.
 
-```text
-run-reference
-run-candidate
-```
+Once Trustvian's zero-input Live view ships (task 074), opening that URL is the
+whole story: the active agent and run are discovered for you, and there is
+nothing to type. The demo asks the running server whether it serves that view
+and tells you which of the two situations you are in.
 
-There is no list or search view, by design — the control plane has no
-collection route, so you navigate by the IDs you already know. The evidence
-is durable in SQLite, so both runs remain retrievable by ID even after the
-demo process exits.
+Until then, this build has no collection route, so you navigate by ID: the
+**Open** tab, then **Open by ID**, then an **Evaluation run ID** of
+`run-reference` or `run-candidate`. The demo prints those IDs. They are
+diagnostics — discovering them is the product's job, not yours.
 
-To reopen the control plane against that same database later, without a
-fresh `make demo`:
+The evidence is durable in SQLite, so both runs stay retrievable after the demo
+exits. To reopen the control plane against that same database later:
 
 ```bash
 .demo/bin/trustvian-local --state-dir .trustvian

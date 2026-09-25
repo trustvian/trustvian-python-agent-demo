@@ -40,6 +40,16 @@ TICKETS_PER_ROUND=3
 REFERENCE_ACTIONS=3   # CRM, Knowledge, Mail
 CANDIDATE_ACTIONS=4   # CRM, Knowledge, Export, Mail
 
+# Whether the agent's own transcript reaches the terminal as it happens.
+#
+# The interactive demo turns this on: watching the model choose each action,
+# next to what Trustvian then reports observing, is most of what the demo is
+# for. smoke.sh leaves it off — it asserts counts rather than reading a
+# transcript, and nine tickets of output would bury its own results. Either
+# way the full transcript is written to the log, which is what a failure
+# message quotes.
+AGENT_STREAM="${AGENT_STREAM:-no}"
+
 # The model this demo is built around. OLLAMA_MODEL overrides it for advanced
 # use; everything documented and tested here uses gemma3:4b.
 OLLAMA_MODEL_NAME="${OLLAMA_MODEL:-gemma3:4b}"
@@ -73,6 +83,42 @@ demo_init() {
 
 log()  { printf '  %s\n' "$*"; }
 fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
+
+# pause waits for the developer to press ENTER, and says why when it does not.
+#
+# Only meaningful with someone watching. With stdin not a terminal — CI, a
+# piped run, an automated verification — it reports that and continues, so the
+# same script is usable both ways and no unattended caller can hang on it.
+# smoke.sh never calls this at all; it is the demo's pacing, not the
+# lifecycle's.
+pause() {
+    local prompt="$1"
+    if [ -t 0 ]; then
+        printf '\n%s' "$prompt"
+        read -r _ || true
+        echo
+    else
+        printf '\n%s\n  (stdin is not a terminal — continuing without waiting)\n' "$prompt"
+    fi
+}
+
+# live_view_available reports whether the running control plane serves the
+# zero-input Live view's collection routes (Trustvian task 074).
+#
+# Asked of the running server over HTTP rather than grepped out of the sibling
+# checkout: a route either answers or it does not, which stays true however the
+# checkout is arranged and whatever the source file is called.
+#
+# `GET /v1/projects` is the discriminator. Today the platform registers only
+# `POST` for that exact path, so a GET is refused; task 074 adds the collection
+# and it answers 200. Anything else — refused, not found, unreachable — means
+# the capability is not there.
+live_view_available() {
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+            "$API_URL/v1/projects?limit=1" 2>/dev/null || true)"
+    [ "$code" = "200" ]
+}
 
 # track PID records a child so cleanup can reach it even if it outlives its
 # shell function.
@@ -180,6 +226,27 @@ $(tail -20 "$log")"
         sleep 0.1
     done
     fail "timed out after ${timeout}s waiting for $what at $url"
+}
+
+# agent_output writes the agent's stream to its log, and also to the terminal
+# when the demo asked for that.
+#
+# `tee` rather than a second `cat` pass, so the transcript appears turn by turn
+# while the model is still working rather than all at once when it finishes —
+# the agent already flushes every line for exactly this reason.
+#
+# Reached through a pipe rather than process substitution, and both callers set
+# `pipefail`: a pipeline waits for every member, so by the time a failure is
+# reported the log is completely written and safe to quote. Process
+# substitution does not wait, and the failure message would sometimes quote a
+# half-flushed file.
+agent_output() {
+    local log="$1"
+    if [ "$AGENT_STREAM" = "yes" ]; then
+        tee "$log"
+    else
+        cat >"$log"
+    fi
 }
 
 # --- Trustvian local runtime -----------------------------------------
@@ -531,7 +598,7 @@ run_agent() {
     OTEL_BSP_SCHEDULE_DELAY="200" \
         "$VENV_DIR/bin/opentelemetry-instrument" \
         "$VENV_DIR/bin/python" "$script" \
-        >"$log" 2>&1 \
+        2>&1 | agent_output "$log" \
         || fail "the $mode agent run failed:
 $(tail -30 "$log")"
 }
@@ -652,23 +719,18 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 }
 
-run_evaluation() {
-    # `actions` is consulted only by the arithmetic expected-count path
-    # below; the summary path reads the agent's own report instead. It is
-    # still a required parameter because every call site passes it, but it
-    # does not predict a count on the summary path.
-    local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
-    local target="${6:-agent}" source="${7:-arithmetic}"
+# An evaluation is three phases rather than one call, because the interactive
+# demo needs to stop between them: the developer opens the Live view once the
+# run exists and the Collector is listening, but *before* any telemetry has
+# been produced, so they watch it arrive rather than find it already there.
+#
+# run_evaluation below still composes all three unchanged, which is what the
+# non-interactive smoke path keeps using.
 
-    # A silent fallback here would defeat the point of this task: a typo'd or
-    # mis-cased source would quietly take the arithmetic branch and predict
-    # the wrong expected count for a model-driven run — the exact failure the
-    # summary path exists to remove, reintroduced one layer up. Fail before
-    # any run is created, not after the agent has already executed.
-    case "$source" in
-        summary|arithmetic) ;;
-        *) fail "run_evaluation: unknown expected-count source '$source'" ;;
-    esac
+# begin_evaluation establishes the hierarchy and the telemetry path, and
+# produces nothing. Afterwards the run is live and the Collector is listening.
+begin_evaluation() {
+    local run_id="$1" candidate_id="$2" profile="$3"
 
     tv eval create --id "$run_id" --candidate-id "$candidate_id" \
         --environment "$ENVIRONMENT" --behavioral-profile "$profile" >/dev/null
@@ -677,6 +739,25 @@ run_evaluation() {
     # The Collector is started after the run is running, because ingest is
     # refused for a pending run and the sink reads its cursor at startup.
     start_collector "$run_id" "$profile"
+}
+
+# observe_agent runs the agent and waits for its evidence to land.
+#
+# `actions` is consulted only by the arithmetic expected-count path; the
+# summary path reads the agent's own report instead.
+observe_agent() {
+    local run_id="$1" mode="$2" actions="$3"
+    local target="${4:-agent}" source="${5:-arithmetic}"
+
+    # A silent fallback here would defeat the point of the summary path: a
+    # typo'd or mis-cased source would quietly take the arithmetic branch and
+    # predict the wrong expected count for a model-driven run — the exact
+    # failure that path exists to remove, reintroduced one layer up.
+    case "$source" in
+        summary|arithmetic) ;;
+        *) fail "observe_agent: unknown expected-count source '$source'" ;;
+    esac
+
     run_agent "$mode" "$target"
 
     # The fixture's activity is fixed, so arithmetic is the stronger check —
@@ -689,11 +770,27 @@ run_evaluation() {
         expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
     fi
     wait_for_records "$run_id" "$expected"
+}
+
+# end_evaluation stops the telemetry path and closes the run.
+end_evaluation() {
+    local run_id="$1"
 
     # Stopped before the run completes: ingest is refused once a run is
     # terminal, so a late span would fail the batch rather than be ignored.
     stop_collector
     tv eval complete --id "$run_id" >/dev/null
+}
+
+# run_evaluation is the whole lifecycle in one call, for callers with nobody
+# watching. smoke.sh uses this; demo.sh drives the three phases itself.
+run_evaluation() {
+    local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
+    local target="${6:-agent}" source="${7:-arithmetic}"
+
+    begin_evaluation "$run_id" "$candidate_id" "$profile"
+    observe_agent "$run_id" "$mode" "$actions" "$target" "$source"
+    end_evaluation "$run_id"
 }
 
 # --- comparison -------------------------------------------------------
