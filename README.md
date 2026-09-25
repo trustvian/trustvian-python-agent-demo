@@ -335,6 +335,12 @@ Removes `.demo/`, `.runtime/` and `.trustvian/` — binaries, the Python
 environment, logs and the evaluation database. `make demo` also resets the
 database on each run, so runs never collide.
 
+A previous `make demo` left running — it holds its terminal open so the web UI
+stays reachable — does not block a new one. The new run stops that runtime and
+starts its own, reporting both steps. It only ever stops a runtime serving this
+directory's `.trustvian/`, so a `trustvian-local` you started yourself, or one
+belonging to another project, is never touched.
+
 ## Layout
 
 ```text

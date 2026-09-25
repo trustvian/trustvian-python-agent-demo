@@ -197,6 +197,12 @@ start_runtime() {
     # .trustvian/platform.db out from under the first, which keeps serving
     # from the deleted inode with no error anywhere. Check for a live runtime
     # ourselves, first, using the same readiness probe as below.
+    #
+    # Finding one, we stop it and carry on rather than refusing. That keeps
+    # the protection — the danger was ever *sharing* the database, not
+    # refusing to start — while sparing the reader a manual step in the one
+    # situation this reliably happens: re-running the demo when a previous
+    # one is still holding the terminal open for its web UI.
     local prior_discovery="$STATE_DIR/runtime.json"
     if [ -s "$prior_discovery" ]; then
         local prior_url
@@ -206,8 +212,38 @@ start_runtime() {
             prior_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
                     "$prior_url/v1/projects/__probe__" 2>/dev/null || true)"
             if [ "$prior_code" = "404" ] || [ "$prior_code" = "200" ]; then
-                fail "a Trustvian demo runtime is already live at $prior_url.
-       Stop the running demo first (Ctrl-C in its terminal), then re-run."
+                log "a previous demo runtime is live at $prior_url — stopping it"
+
+                # Matched on this demo's own state directory, so it can only
+                # ever reach a runtime serving *these* files. An unrelated
+                # trustvian-local, started by hand or by another project, has
+                # a different --state-dir and is never a candidate.
+                #
+                # Stopping the runtime is also all that is needed: the other
+                # demo.sh is blocked in `wait "$RUNTIME_PID"`, so it returns,
+                # runs its EXIT trap, and reaps its own mocks and Collector.
+                pkill -TERM -f "trustvian-local --state-dir $STATE_DIR" 2>/dev/null || true
+
+                # Wait for the endpoint to actually stop answering before
+                # deleting the directory underneath it — the race this guard
+                # exists to prevent would otherwise just move here.
+                local gone_by=$(( SECONDS + 15 ))
+                while (( SECONDS < gone_by )); do
+                    prior_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                            "$prior_url/v1/projects/__probe__" 2>/dev/null || true)"
+                    case "$prior_code" in
+                        404|200) ;;
+                        *) break ;;
+                    esac
+                    sleep 0.2
+                done
+                case "$prior_code" in
+                    404|200)
+                        fail "a Trustvian demo runtime is still live at $prior_url
+       after being asked to stop. Stop it by hand (Ctrl-C in its terminal),
+       then re-run." ;;
+                esac
+                log "previous runtime stopped"
             fi
         fi
     fi
