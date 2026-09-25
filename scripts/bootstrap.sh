@@ -73,9 +73,9 @@ if ! grep -q 'mapstructure:"evaluation' "$TRUSTVIAN_DIR/processor/config.go"; th
     fail "the Trustvian checkout at $TRUSTVIAN_DIR has no Collector evaluation sink.
 
        This demo needs task 073, which adds the processor's evaluation: block.
-       Check out the branch that carries it:
+       It is on Trustvian's main branch — update the checkout:
 
-           git -C $TRUSTVIAN_DIR switch feat/otel-platform-evaluation-sink"
+           git -C $TRUSTVIAN_DIR switch main && git -C $TRUSTVIAN_DIR pull"
 fi
 log "Collector evaluation ingest is available"
 
