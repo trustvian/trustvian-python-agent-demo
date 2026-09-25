@@ -8,43 +8,92 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 demo_init
 
 echo
-echo "Trustvian Python Agent Demo"
+echo "Trustvian Local Agent Demo"
+echo "--------------------------"
 echo
 
 "$DEMO_ROOT/scripts/bootstrap.sh"
 
-echo "Preparing the local model"
-ensure_ollama
-log "provider: Ollama"
-log "model:    $OLLAMA_MODEL_NAME"
 echo
+# The developer watches the model decide, so the agent's transcript goes to the
+# terminal as it happens rather than only to its log.
+AGENT_STREAM="yes"
 
-echo "Starting Trustvian"
+echo "LLM:   Ollama"
+echo "Model: $OLLAMA_MODEL_NAME"
+echo
+ensure_ollama
+
 start_runtime
-log "API: $API_URL"
-log "Web: $API_URL/"
+log "control plane ready"
 
-echo "Starting mock services"
 start_mocks
-log "crm/knowledge/mail/export .localhost on port $MOCK_PORT"
+log "local services ready on port $MOCK_PORT (crm/knowledge/mail/export .localhost)"
 
-echo "Creating control-plane objects"
+# The hierarchy exists before any telemetry does. Zero-input is a statement
+# about what the developer types into the browser, never about the platform
+# inventing entities: ingest into a run that does not exist, or one that is not
+# running, is refused — and should be.
 create_control_plane
 log "project $PROJECT_ID, agent $AGENT_ID, candidates $REFERENCE_CANDIDATE and $CANDIDATE_CANDIDATE"
 
 echo
-echo "REFERENCE  ($REFERENCE_RUN)"
-run_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-               "reference" "$REFERENCE_ACTIONS" "agent" "summary"
-REFERENCE_STEPS="$(agent_steps)"
-log "records: $(record_count "$REFERENCE_RUN")   distinct behaviors: $(distinct_behaviors "$REFERENCE_RUN")"
-
+echo "─────────────────────────────────────────────"
 echo
-echo "CANDIDATE  ($CANDIDATE_RUN)"
-run_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-               "candidate" "$CANDIDATE_ACTIONS" "agent" "summary"
+echo "Open the Trustvian Live view:"
+echo
+echo "    $API_URL/"
+echo
+
+# Whether the developer has to type identifiers is a property of the server,
+# so it is asked of the server rather than assumed from a version or a branch.
+if live_view_available; then
+    LIVE_VIEW="yes"
+    echo "  No IDs need to be entered — the Live view discovers the active"
+    echo "  agent and run by itself."
+else
+    LIVE_VIEW="no"
+    cat <<'NOTE'
+  This Trustvian build does not serve the zero-input Live view (task 074:
+  specified, not implemented). The demo below is unaffected — the agent, the
+  telemetry and the comparison are all real — but the browser cannot discover
+  the run on its own yet.
+
+  To watch it in this build, navigate by ID instead:
+      Open tab -> Open by ID -> Evaluation run ID
+NOTE
+    echo "      $REFERENCE_RUN   (then $CANDIDATE_RUN for the second run)"
+fi
+
+pause "Press ENTER when the browser is open..."
+
+echo "REFERENCE"
+echo
+begin_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE"
+observe_agent "$REFERENCE_RUN" "reference" "$REFERENCE_ACTIONS" "agent" "summary"
+end_evaluation "$REFERENCE_RUN"
+REFERENCE_STEPS="$(agent_steps)"
+echo
+log "reference run completed: $(record_count "$REFERENCE_RUN") observations, $(distinct_behaviors "$REFERENCE_RUN") behaviors"
+
+cat <<NOTE
+
+Reference run complete.
+
+The candidate has access to one more tool: it may export a customer record,
+reaching export.localhost. Its instructions require the export as part of the
+workflow, but not where in the sequence it happens — $OLLAMA_MODEL_NAME decides that.
+NOTE
+pause "Press ENTER to run the candidate..."
+
+echo "CANDIDATE"
+echo
+begin_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE"
+observe_agent "$CANDIDATE_RUN" "candidate" "$CANDIDATE_ACTIONS" "agent" "summary"
+end_evaluation "$CANDIDATE_RUN"
 CANDIDATE_STEPS="$(agent_steps)"
-log "records: $(record_count "$CANDIDATE_RUN")   distinct behaviors: $(distinct_behaviors "$CANDIDATE_RUN")"
+echo
+log "candidate run completed: $(record_count "$CANDIDATE_RUN") observations, $(distinct_behaviors "$CANDIDATE_RUN") behaviors"
 
 echo
 echo "Comparing"
@@ -195,15 +244,20 @@ else
 fi
 
 echo
-echo "Inspect:"
-echo "  Reference run: $REFERENCE_RUN"
-echo "  Candidate run: $CANDIDATE_RUN"
+echo "Trustvian remains running for inspection:"
 echo
-echo "Open:"
-echo "  $API_URL/"
-echo "  then: Open tab -> Open by ID -> Evaluation run ID -> $CANDIDATE_RUN -> Open run"
+echo "    $API_URL/"
 echo
-echo "Ctrl-C to stop."
+if [ "$LIVE_VIEW" = "no" ]; then
+    echo "  Navigate by ID: Open tab -> Open by ID -> Evaluation run ID"
+    echo "    $REFERENCE_RUN   $CANDIDATE_RUN"
+    echo
+fi
+# Printed as diagnostics, not as something anyone should have to type into a
+# browser. The identifiers exist; discovering them is the product's job.
+log "run ids: $REFERENCE_RUN, $CANDIDATE_RUN"
+echo
+echo "Press Ctrl-C to stop the demo."
 echo
 
 # The runtime stays up so the WebUI is usable. Block on the runtime process

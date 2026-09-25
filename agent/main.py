@@ -160,9 +160,16 @@ def build_summary(finished: bool, http_calls: int, steps, mode: str,
 
 
 def _print_step(action_name: str, result) -> None:
-    print(f"  model  -> {action_name}", flush=True)
+    """Show what the model chose and what the tool actually returned.
+
+    Two lines per turn, because they are two different facts: the action is
+    the model's decision, the result is what the world said back. A reader
+    comparing this transcript against what the observer recorded needs to see
+    them separately.
+    """
+    print(f"  model \u2192 {action_name}", flush=True)
     if result is not None:
-        print(f"  tool      {result}", flush=True)
+        print(f"  tool  \u2192 {result}", flush=True)
 
 
 def main() -> int:
@@ -200,8 +207,7 @@ def main() -> int:
     try:
         for index in range(rounds):
             ticket = TICKETS[index % len(TICKETS)]
-            print(f"  ticket {ticket['id']} ({index + 1} of {rounds})",
-                  flush=True)
+            print(f"\nticket {ticket['id']}", flush=True)
             all_steps.extend(
                 run_once(session, planner_obj, port, mode, ticket, _print_step))
         finished = True
