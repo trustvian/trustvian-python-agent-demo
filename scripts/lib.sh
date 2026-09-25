@@ -532,8 +532,33 @@ agent_steps() {
 
 # --- evaluation runs --------------------------------------------------
 
+# supports_environments reports whether the built CLI has the `env` command
+# family, by asking the binary itself rather than inferring it from a branch
+# name or a version string.
+#
+# Trustvian's environment model (task 065) makes a run's environment something
+# that must already exist: requireUsableEnvironment refuses a run whose
+# environment is missing, so a control plane built from a checkout that carries
+# it needs one created before the first `eval create`. A checkout without it has
+# no `env` command and needs nothing. Asking the binary is what lets this demo
+# work against both, which matters because the README and CI target `main`
+# while the feature is developed on a branch.
+supports_environments() {
+    "$BIN_DIR/trustvian" --help 2>&1 | grep -q 'trustvian env'
+}
+
 create_control_plane() {
     tv project create   --id "$PROJECT_ID" --name "$PROJECT_NAME" >/dev/null
+
+    # Created immediately after the project that owns it, and before any run
+    # names it. A new environment is active on creation, which is the state a
+    # run requires.
+    if supports_environments; then
+        tv env create --project-id "$PROJECT_ID" --ref "$ENVIRONMENT" \
+            --name "Local" >/dev/null
+        log "environment $ENVIRONMENT created"
+    fi
+
     tv agent create     --id "$AGENT_ID" --project-id "$PROJECT_ID" --name "$AGENT_NAME" >/dev/null
     tv candidate create --id "$REFERENCE_CANDIDATE" --agent-id "$AGENT_ID" \
         --label "reference behavior" >/dev/null
