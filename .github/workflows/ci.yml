@@ -33,20 +33,12 @@ jobs:
       # The demo builds Trustvian from a sibling checkout, so CI reproduces
       # that layout rather than special-casing itself.
       #
-      # The ref defaults to `main`, which as of this writing does NOT yet
-      # carry the Collector's evaluation sink (task 073) — that work lives on
-      # `feat/otel-platform-evaluation-sink` and has not merged. Until it
-      # does, CI on this default will fail at bootstrap.sh's evaluation-sink
-      # guard, which names this exact problem. Set the repository variable
-      # TRUSTVIAN_REF to `feat/otel-platform-evaluation-sink` to run CI in
-      # the meantime. Once that branch merges to main, TRUSTVIAN_REF can be
-      # unset again. The default here is deliberately left as `main` rather
-      # than pinned to the feature branch, because a pinned default would
-      # break the moment that branch is deleted after merging.
+      # Set the repository variable TRUSTVIAN_REF to test this demo against a
+      # Trustvian ref other than the default branch.
       - name: Check out Trustvian beside it
         uses: actions/checkout@v4
         with:
-          repository: Trustvian/trustvian
+          repository: trustvian/trustvian
           ref: ${{ vars.TRUSTVIAN_REF || 'main' }}
           path: trustvian
 

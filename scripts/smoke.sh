@@ -27,19 +27,24 @@ echo
 # Application isolation. Checked first, because it needs nothing running
 # and it is the claim the whole demo exists to make.
 #
-# agent/main.py no longer merely avoids *importing* either project — the
-# words "trustvian" and "opentelemetry" do not appear anywhere in the file
+# The application files no longer merely avoid *importing* either project —
+# the words "trustvian" and "opentelemetry" do not appear anywhere in them
 # at all, including comments and docstrings, because a narrated claim of
 # isolation would undercut the isolation itself. So the check here is a
 # plain whole-file search, not an import- or call-shaped grep: it is both
 # simpler and a better proof than the narrower pattern would be.
 #
 # If someone legitimately needs to mention either project in a comment in
-# agent/main.py later (e.g. explaining why it must stay uninstrumented),
-# that person is choosing to weaken this exact check, and should do so
-# deliberately here rather than let it happen by accident.
+# one of these files later (e.g. explaining why it must stay
+# uninstrumented), that person is choosing to weaken this exact check, and
+# should do so deliberately here rather than let it happen by accident.
 # ---------------------------------------------------------------------
 echo "Application isolation"
+
+# Explicit rather than a glob: adding an application file to this set is a
+# decision someone makes here, not something a new file inherits silently.
+APPLICATION_SOURCES="agent/main.py agent/planner.py agent/tools.py \
+agent/__init__.py fixtures/deterministic_agent.py"
 
 # grep exits 1 when it read the file and matched nothing, and 2 when it
 # could not open the file at all — `!` only inverts zero-versus-nonzero, so
@@ -47,12 +52,20 @@ echo "Application isolation"
 # passing result. Guard on readability first, explicitly, so a missing or
 # unreadable file is reported as exactly that rather than as a pass.
 no_forbidden_mentions() {
-    local target="$DEMO_ROOT/agent/main.py"
-    if [ ! -r "$target" ]; then
-        printf '        agent/main.py is missing or unreadable at %s\n' "$target" >&2
-        return 1
-    fi
-    ! grep -nEi '(trustvian|opentelemetry)' "$target"
+    local target path rc=0
+    for target in $APPLICATION_SOURCES; do
+        path="$DEMO_ROOT/$target"
+        if [ ! -r "$path" ]; then
+            printf '        %s is missing or unreadable at %s\n' "$target" "$path" >&2
+            rc=1
+            continue
+        fi
+        if grep -nEi '(trustvian|opentelemetry)' "$path"; then
+            printf '        %s mentions a forbidden name above\n' "$target" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
 }
 no_forbidden_dependencies() {
     local target="$DEMO_ROOT/agent/requirements.txt"
@@ -63,7 +76,7 @@ no_forbidden_dependencies() {
     ! grep -nEi '^[[:space:]]*(trustvian|opentelemetry)' "$target"
 }
 
-check "agent/main.py mentions neither trustvian nor opentelemetry, anywhere in the file" no_forbidden_mentions
+check "application sources mention neither trustvian nor opentelemetry, anywhere" no_forbidden_mentions
 check "agent/requirements.txt declares neither"                                          no_forbidden_dependencies
 
 if [ "$FAILURES" -ne 0 ]; then
@@ -81,6 +94,20 @@ echo "Lifecycle"
 "$DEMO_ROOT/scripts/bootstrap.sh" >/dev/null
 log "bootstrap"
 
+# The tests need the demo venv for `requests`, so they run after bootstrap —
+# but before anything is started, because a logic error in the agent should
+# cost seconds rather than a whole lifecycle.
+unit_tests_pass() {
+    "$VENV_DIR/bin/python" -m unittest discover -s "$DEMO_ROOT/tests" -q
+}
+check "agent unit tests pass" unit_tests_pass
+
+if [ "$FAILURES" -ne 0 ]; then
+    echo
+    echo "Unit tests failed; not running the lifecycle."
+    exit 1
+fi
+
 start_runtime
 log "runtime at $API_URL"
 
@@ -91,11 +118,11 @@ create_control_plane
 log "control-plane objects created"
 
 run_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-               "reference" "$REFERENCE_ACTIONS"
+               "reference" "$REFERENCE_ACTIONS" "fixture"
 log "reference run complete"
 
 run_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-               "candidate" "$CANDIDATE_ACTIONS"
+               "candidate" "$CANDIDATE_ACTIONS" "fixture"
 log "candidate run complete"
 
 compare_runs

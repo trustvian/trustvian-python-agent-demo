@@ -29,11 +29,29 @@ CANDIDATE_PROFILE="support-candidate"
 # be compared at all.
 ENVIRONMENT="local"
 
-# Three tickets per round; the agent loops SUPPORT_AGENT_ROUNDS rounds.
+# fixtures/deterministic_agent.py works three tickets per round, which is
+# why smoke records 27. agent/main.py (the model-driven agent) works one
+# ticket per round instead (TICKETS[index % len(TICKETS)]), which is why the
+# demo records 21 — deliberately: each model-driven ticket costs several
+# model round-trips, so three tickets per round would triple those.
+# TICKETS_PER_ROUND below describes the fixture only.
 ROUNDS="${SUPPORT_AGENT_ROUNDS:-3}"
 TICKETS_PER_ROUND=3
 REFERENCE_ACTIONS=3   # CRM, Knowledge, Mail
 CANDIDATE_ACTIONS=4   # CRM, Knowledge, Export, Mail
+
+# The model this demo is built around. OLLAMA_MODEL overrides it for advanced
+# use; everything documented and tested here uses gemma3:4b.
+OLLAMA_MODEL_NAME="${OLLAMA_MODEL:-gemma3:4b}"
+# Deliberately not the same address the agent calls. This probe wants the
+# most reliable address, 127.0.0.1; the agent calls ollama.localhost instead
+# because a hostname is what makes the model call legible as its own
+# behaviour in the engine's diff (see planner.default_url). Both hardcode
+# port 11434, so a non-default Ollama bind fails here as a readiness timeout
+# rather than as a named mismatch.
+OLLAMA_API="http://127.0.0.1:11434"
+OLLAMA_STARTED="no"
+OLLAMA_PID=""
 
 # CHILD_PIDS holds every process this script started, in start order.
 # RUNTIME_PID is tracked separately because start_runtime needs to notice its
@@ -179,6 +197,12 @@ start_runtime() {
     # .trustvian/platform.db out from under the first, which keeps serving
     # from the deleted inode with no error anywhere. Check for a live runtime
     # ourselves, first, using the same readiness probe as below.
+    #
+    # Finding one, we stop it and carry on rather than refusing. That keeps
+    # the protection — the danger was ever *sharing* the database, not
+    # refusing to start — while sparing the reader a manual step in the one
+    # situation this reliably happens: re-running the demo when a previous
+    # one is still holding the terminal open for its web UI.
     local prior_discovery="$STATE_DIR/runtime.json"
     if [ -s "$prior_discovery" ]; then
         local prior_url
@@ -188,13 +212,53 @@ start_runtime() {
             prior_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
                     "$prior_url/v1/projects/__probe__" 2>/dev/null || true)"
             if [ "$prior_code" = "404" ] || [ "$prior_code" = "200" ]; then
-                fail "a Trustvian demo runtime is already live at $prior_url.
-       Stop the running demo first (Ctrl-C in its terminal), then re-run."
+                log "a previous demo runtime is live at $prior_url — stopping it"
+
+                # Matched on this demo's own state directory, so it can only
+                # ever reach a runtime serving *these* files. An unrelated
+                # trustvian-local, started by hand or by another project, has
+                # a different --state-dir and is never a candidate.
+                #
+                # Stopping the runtime is also all that is needed: the other
+                # demo.sh is blocked in `wait "$RUNTIME_PID"`, so it returns,
+                # runs its EXIT trap, and reaps its own mocks and Collector.
+                pkill -TERM -f "trustvian-local --state-dir $STATE_DIR" 2>/dev/null || true
+
+                # Wait for the endpoint to actually stop answering before
+                # deleting the directory underneath it — the race this guard
+                # exists to prevent would otherwise just move here.
+                local gone_by=$(( SECONDS + 15 ))
+                while (( SECONDS < gone_by )); do
+                    prior_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                            "$prior_url/v1/projects/__probe__" 2>/dev/null || true)"
+                    case "$prior_code" in
+                        404|200) ;;
+                        *) break ;;
+                    esac
+                    sleep 0.2
+                done
+                case "$prior_code" in
+                    404|200)
+                        fail "a Trustvian demo runtime is still live at $prior_url
+       after being asked to stop. Stop it by hand (Ctrl-C in its terminal),
+       then re-run." ;;
+                esac
+                log "previous runtime stopped"
             fi
         fi
     fi
 
     rm -rf "$STATE_DIR"
+
+    # The pending-state file and the control-plane evidence it reconciles
+    # against share exactly one lifetime. Run ids are fixed strings
+    # (run-reference, run-candidate) reused across invocations, so a stale
+    # pending file left behind here would describe a run that no longer
+    # exists once the control plane above is wiped — and a fresh run reusing
+    # that id would inherit a predecessor's unsettled record on its first
+    # Collector startup. Discarding the state dir without also discarding
+    # these notes would defeat the fix above, not just leave it incomplete.
+    rm -f "$RUNTIME_DIR"/collector-pending-*.json
 
     "$BIN_DIR/trustvian-local" --state-dir "$STATE_DIR" \
         >"$RUNTIME_DIR/trustvian-local.log" 2>&1 &
@@ -242,6 +306,68 @@ $(cat "$RUNTIME_DIR/trustvian-local.log")"
 # <url>` works, matching docs/platform-cli.md's worked examples — do not
 # "tidy" this back to a leading flag.
 tv() { "$BIN_DIR/trustvian" "$@" --api-url "$API_URL"; }
+
+# --- Ollama -------------------------------------------------------------
+
+# ensure_ollama makes a local Ollama with the demo's model available.
+#
+# It reuses a server that is already running, and only ever stops one it
+# started itself: a developer's own Ollama, serving other work, must survive
+# this demo. That guarantee is mechanical rather than conditional — the PID is
+# tracked only on the branch that started it, so cleanup cannot reach a server
+# it did not create.
+ensure_ollama() {
+    command -v ollama >/dev/null 2>&1 || fail "ollama is not on PATH.
+       Install it from https://ollama.com/download, then re-run \`make demo\`.
+       \`make smoke\` needs no model and does not require Ollama."
+
+    if curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null; then
+        OLLAMA_STARTED="no"
+        log "reusing the Ollama server already running at $OLLAMA_API"
+    else
+        log "starting ollama serve"
+        ollama serve >"$RUNTIME_DIR/ollama.log" 2>&1 &
+        OLLAMA_PID=$!
+        OLLAMA_STARTED="yes"
+        # Tracked only on this branch. A server we did not start is never in
+        # CHILD_PIDS, so cleanup cannot signal it.
+        track "$OLLAMA_PID"
+
+        local deadline=$(( SECONDS + 60 ))
+        while (( SECONDS < deadline )); do
+            if curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null; then
+                break
+            fi
+            if ! kill -0 "$OLLAMA_PID" 2>/dev/null; then
+                fail "ollama serve exited during startup:
+$(tail -20 "$RUNTIME_DIR/ollama.log")"
+            fi
+            sleep 0.2
+        done
+        curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null \
+            || fail "the Ollama API did not become ready at $OLLAMA_API:
+$(tail -20 "$RUNTIME_DIR/ollama.log")"
+        log "ollama serve is ready"
+    fi
+
+    # `ollama list` prints one row per installed model, plus a header. Match
+    # the whole first field exactly, so gemma3:4b-something can never satisfy
+    # a request for gemma3:4b. -F treats the model name as a fixed string, not
+    # a regex — a dotted tag like llama3.2:latest is an ordinary model name,
+    # not a wildcard pattern.
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qxF "$OLLAMA_MODEL_NAME"; then
+        log "$OLLAMA_MODEL_NAME is already installed"
+    else
+        echo
+        echo "  $OLLAMA_MODEL_NAME is not installed locally."
+        echo "  Pulling it with Ollama — a few GB, once."
+        echo
+        ollama pull "$OLLAMA_MODEL_NAME" \
+            || fail "failed to pull $OLLAMA_MODEL_NAME.
+       Check your network connection and that the model name is correct."
+        log "$OLLAMA_MODEL_NAME pulled"
+    fi
+}
 
 # --- mock services ----------------------------------------------------
 
@@ -295,6 +421,13 @@ processors:
       run_id: $run_id
       behavioral_profile: $profile
       required: true
+      # Holds the single record that may be in flight, so a Collector that
+      # dies between recording evidence in the control plane and applying
+      # that record's learning can tell on restart which of the two already
+      # happened. One file per run: the sink refuses to start against a
+      # note naming a different run rather than discarding an unsettled
+      # record.
+      pending_state_path: $RUNTIME_DIR/collector-pending-$run_id.json
 
 exporters:
   debug:
@@ -358,7 +491,20 @@ stop_collector() {
 # --- the agent, under runtime instrumentation ------------------------
 
 run_agent() {
-    local mode="$1" log="$RUNTIME_DIR/agent-$mode.log"
+    local mode="$1" target="${2:-agent}" log="$RUNTIME_DIR/agent-$mode.log"
+
+    # The deterministic fixture and the model-driven agent take exactly the
+    # same environment and produce the same kind of activity. Which one runs
+    # is the caller's choice, not a mode the application knows about.
+    local script
+    case "$target" in
+        agent)   script="$DEMO_ROOT/agent/main.py" ;;
+        fixture) script="$DEMO_ROOT/fixtures/deterministic_agent.py" ;;
+        *)       fail "run_agent: unknown target '$target'" ;;
+    esac
+
+    AGENT_STEPS_FILE="$RUNTIME_DIR/agent-$mode-summary.json"
+    rm -f "$AGENT_STEPS_FILE"
 
     # Every OTEL_* variable is supplied here, at launch. None of them is
     # referenced by the application, and none is written into its manifest.
@@ -371,6 +517,9 @@ run_agent() {
     SUPPORT_AGENT_PORT="$MOCK_PORT" \
     SUPPORT_AGENT_MODE="$mode" \
     SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+    SUPPORT_AGENT_SUMMARY="$AGENT_STEPS_FILE" \
+    OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
+    PYTHONPATH="$DEMO_ROOT" \
     OTEL_SERVICE_NAME="support-agent" \
     OTEL_RESOURCE_ATTRIBUTES="deployment.environment.name=$ENVIRONMENT" \
     OTEL_SEMCONV_STABILITY_OPT_IN="http" \
@@ -381,16 +530,71 @@ run_agent() {
     OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$OTLP_PORT" \
     OTEL_BSP_SCHEDULE_DELAY="200" \
         "$VENV_DIR/bin/opentelemetry-instrument" \
-        "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py" \
+        "$VENV_DIR/bin/python" "$script" \
         >"$log" 2>&1 \
         || fail "the $mode agent run failed:
-$(tail -20 "$log")"
+$(tail -30 "$log")"
+}
+
+# agent_http_calls reports how many requests the last run made.
+#
+# The model decides how many turns to take, so this count cannot be computed
+# in advance — the agent reports what it actually did. A missing or
+# unparseable summary is a hard failure: waiting on an invented number would
+# turn "the agent never finished" into a timeout that appears to blame record
+# counts a minute later.
+agent_http_calls() {
+    local mode="$1"
+    [ -r "$AGENT_STEPS_FILE" ] \
+        || fail "the agent wrote no run summary at $AGENT_STEPS_FILE, so it
+       did not finish. Its log is $RUNTIME_DIR/agent-$mode.log"
+    local calls
+    calls="$(jq -r '.http_calls // empty' "$AGENT_STEPS_FILE" 2>/dev/null || true)"
+    case "$calls" in
+        ''|*[!0-9]*)
+            fail "the agent's run summary has no usable http_calls:
+$(cat "$AGENT_STEPS_FILE")" ;;
+    esac
+    printf '%s\n' "$calls"
+}
+
+# agent_steps echoes the actions the model chose, one per line. Unlike the
+# count, an unreadable summary is not fatal here: this is narration, and
+# agent_http_calls has already failed the run if the summary is missing.
+agent_steps() {
+    [ -r "$AGENT_STEPS_FILE" ] || return 0
+    jq -r '.steps[]?' "$AGENT_STEPS_FILE" 2>/dev/null || true
 }
 
 # --- evaluation runs --------------------------------------------------
 
+# supports_environments reports whether the built CLI has the `env` command
+# family, by asking the binary itself rather than inferring it from a branch
+# name or a version string.
+#
+# Trustvian's environment model (task 065) makes a run's environment something
+# that must already exist: requireUsableEnvironment refuses a run whose
+# environment is missing, so a control plane built from a checkout that carries
+# it needs one created before the first `eval create`. A checkout without it has
+# no `env` command and needs nothing. Asking the binary is what lets this demo
+# work against both, which matters because the README and CI target `main`
+# while the feature is developed on a branch.
+supports_environments() {
+    "$BIN_DIR/trustvian" --help 2>&1 | grep -q 'trustvian env'
+}
+
 create_control_plane() {
     tv project create   --id "$PROJECT_ID" --name "$PROJECT_NAME" >/dev/null
+
+    # Created immediately after the project that owns it, and before any run
+    # names it. A new environment is active on creation, which is the state a
+    # run requires.
+    if supports_environments; then
+        tv env create --project-id "$PROJECT_ID" --ref "$ENVIRONMENT" \
+            --name "Local" >/dev/null
+        log "environment $ENVIRONMENT created"
+    fi
+
     tv agent create     --id "$AGENT_ID" --project-id "$PROJECT_ID" --name "$AGENT_NAME" >/dev/null
     tv candidate create --id "$REFERENCE_CANDIDATE" --agent-id "$AGENT_ID" \
         --label "reference behavior" >/dev/null
@@ -449,8 +653,22 @@ $(tail -20 "$RUNTIME_DIR/collector-$run_id.log")"
 }
 
 run_evaluation() {
+    # `actions` is consulted only by the arithmetic expected-count path
+    # below; the summary path reads the agent's own report instead. It is
+    # still a required parameter because every call site passes it, but it
+    # does not predict a count on the summary path.
     local run_id="$1" candidate_id="$2" profile="$3" mode="$4" actions="$5"
-    local expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
+    local target="${6:-agent}" source="${7:-arithmetic}"
+
+    # A silent fallback here would defeat the point of this task: a typo'd or
+    # mis-cased source would quietly take the arithmetic branch and predict
+    # the wrong expected count for a model-driven run — the exact failure the
+    # summary path exists to remove, reintroduced one layer up. Fail before
+    # any run is created, not after the agent has already executed.
+    case "$source" in
+        summary|arithmetic) ;;
+        *) fail "run_evaluation: unknown expected-count source '$source'" ;;
+    esac
 
     tv eval create --id "$run_id" --candidate-id "$candidate_id" \
         --environment "$ENVIRONMENT" --behavioral-profile "$profile" >/dev/null
@@ -459,7 +677,17 @@ run_evaluation() {
     # The Collector is started after the run is running, because ingest is
     # refused for a pending run and the sink reads its cursor at startup.
     start_collector "$run_id" "$profile"
-    run_agent "$mode"
+    run_agent "$mode" "$target"
+
+    # The fixture's activity is fixed, so arithmetic is the stronger check —
+    # it would catch a fixture that silently did less. The model-driven
+    # agent's is not, so its own report is the only honest source.
+    local expected
+    if [ "$source" = "summary" ]; then
+        expected="$(agent_http_calls "$mode")"
+    else
+        expected=$(( ROUNDS * TICKETS_PER_ROUND * actions ))
+    fi
     wait_for_records "$run_id" "$expected"
 
     # Stopped before the run completes: ingest is refused once a run is

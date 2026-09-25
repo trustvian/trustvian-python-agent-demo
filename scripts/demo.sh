@@ -13,6 +13,12 @@ echo
 
 "$DEMO_ROOT/scripts/bootstrap.sh"
 
+echo "Preparing the local model"
+ensure_ollama
+log "provider: Ollama"
+log "model:    $OLLAMA_MODEL_NAME"
+echo
+
 echo "Starting Trustvian"
 start_runtime
 log "API: $API_URL"
@@ -29,13 +35,15 @@ log "project $PROJECT_ID, agent $AGENT_ID, candidates $REFERENCE_CANDIDATE and $
 echo
 echo "REFERENCE  ($REFERENCE_RUN)"
 run_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-               "reference" "$REFERENCE_ACTIONS"
+               "reference" "$REFERENCE_ACTIONS" "agent" "summary"
+REFERENCE_STEPS="$(agent_steps)"
 log "records: $(record_count "$REFERENCE_RUN")   distinct behaviors: $(distinct_behaviors "$REFERENCE_RUN")"
 
 echo
 echo "CANDIDATE  ($CANDIDATE_RUN)"
 run_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-               "candidate" "$CANDIDATE_ACTIONS"
+               "candidate" "$CANDIDATE_ACTIONS" "agent" "summary"
+CANDIDATE_STEPS="$(agent_steps)"
 log "records: $(record_count "$CANDIDATE_RUN")   distinct behaviors: $(distinct_behaviors "$CANDIDATE_RUN")"
 
 echo
@@ -66,10 +74,10 @@ CRITICAL_PASSED="$(jq -r '.gate.critical_risk_observations.passed' "$COMPARISON_
 #
 # CANDIDATE observed shared + added. Reusing the reference's helper here
 # would print a removed behaviour under CANDIDATE as "observed", which is
-# the opposite of what `removed` means — this fixture's agent happens to
-# make the candidate a strict superset of the reference, so removed_count
-# is always 0 today, but that is a property of the fixture, not something
-# this script checks.
+# the opposite of what `removed` means. Today the candidate is in practice a
+# superset of the reference, so removed_count is 0 — but with a model
+# choosing the actions that is an observation about this run rather than an
+# invariant, which is exactly why the two helpers stay separate.
 reference_targets() {
     jq -r '.behavior_diff.deltas[]
            | select(.change == "shared" or .change == "removed")
@@ -92,18 +100,57 @@ echo
 echo "Trustvian"
 echo "  Web: $API_URL/"
 echo
+echo "Model"
+echo "  provider: Ollama"
+echo "  model:    $OLLAMA_MODEL_NAME"
+echo
 echo "REFERENCE"
+echo "  the model chose:"
+while read -r step; do
+    [ -n "$step" ] && printf '    %s\n' "$step"
+done <<STEPS
+$REFERENCE_STEPS
+STEPS
+echo "  Trustvian observed $(record_count "$REFERENCE_RUN") calls across $(distinct_behaviors "$REFERENCE_RUN") behaviors:"
 while read -r target; do
-    [ -n "$target" ] && printf '  %-22s observed\n' "$target"
+    [ -n "$target" ] && printf '    %-22s observed\n' "$target"
 done < <(reference_targets)
 echo
 echo "CANDIDATE"
+echo "  the model chose:"
+while read -r step; do
+    [ -n "$step" ] && printf '    %s\n' "$step"
+done <<STEPS
+$CANDIDATE_STEPS
+STEPS
+echo "  Trustvian observed $(record_count "$CANDIDATE_RUN") calls across $(distinct_behaviors "$CANDIDATE_RUN") behaviors:"
 while read -r target; do
-    [ -n "$target" ] && printf '  %-22s observed\n' "$target"
+    [ -n "$target" ] && printf '    %-22s observed\n' "$target"
 done < <(shared_targets)
 while read -r target; do
-    [ -n "$target" ] && printf '  %-22s NEW\n' "$target"
+    [ -n "$target" ] && printf '    %-22s NEW\n' "$target"
 done < <(added_targets)
+echo
+echo "BEHAVIORAL DIFF"
+echo "  Shared:  $(jq -r '.behavior_diff.shared_count'  "$COMPARISON_FILE")"
+echo "  Removed: $(jq -r '.behavior_diff.removed_count' "$COMPARISON_FILE")"
+echo "  Added:   $(jq -r '.behavior_diff.added_count'   "$COMPARISON_FILE")"
+while read -r target; do
+    [ -n "$target" ] && printf '    + %s\n' "$target"
+done < <(added_targets)
+
+# The demo's claim is that the model chose the export, not that Python called
+# it. If it did not, say so plainly and show what it chose instead: a useful
+# failure is worth far more than a demo that quietly stages its own result.
+if ! grep -qx "export.localhost" < <(added_targets); then
+    echo
+    echo "  NOTE: the candidate run did not produce the expected export behavior."
+    echo "  $OLLAMA_MODEL_NAME chose: $(printf '%s ' $CANDIDATE_STEPS)"
+    echo "  Nothing was injected to force it. Re-running usually resolves a"
+    echo "  one-off; a persistent failure means the model is not following the"
+    echo "  candidate policy, and this demo reports that rather than hide it."
+fi
+
 echo
 echo "COMPARISON"
 echo "  Added behaviors: $ADDED"
@@ -132,9 +179,11 @@ if [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ] \
 NOTE
 elif [ "$COMPARE_STATUS" -eq 1 ] && [ "$VERDICT" = "fail" ]; then
     echo "  Gate FAIL, but not solely from the added-behaviors check:"
-    # `if` rather than a bare `[ ... ] && echo ...`: under `set -e`, a
-    # standalone `&&` list whose test legitimately evaluates false (that
-    # check passed) would exit the whole script right here.
+    # `if` rather than a bare `[ ... ] && echo ...`: both forms are safe
+    # here under `set -e` (a `[ ... ] &&` list is not the last command in
+    # its AND-OR list, so errexit does not fire when the test is false —
+    # the same form is used safely elsewhere in this file). `if` is used
+    # for readability across five checks in a row.
     if [ "$REF_EVIDENCE_PASSED" = "false" ]; then echo "    - reference evidence check failed"; fi
     if [ "$CAND_EVIDENCE_PASSED" = "false" ]; then echo "    - candidate evidence check failed"; fi
     if [ "$ADDED_PASSED" = "false" ]; then echo "    - added-behaviors check failed"; fi
@@ -159,10 +208,11 @@ echo
 
 # The runtime stays up so the WebUI is usable. Block on the runtime process
 # specifically — a bare `wait` returns 0 immediately once the shell has no
-# children left to wait for (verified on bash 3.2.57), which would spin this
-# loop at full CPU instead of holding here. `wait "$RUNTIME_PID"` blocks
-# until that process exits (normally, or via the signal that fires the trap
-# below), and stays interruptible by Ctrl-C throughout.
+# children left to wait for (verified on bash 3.2.57), which would fall
+# through here immediately instead of holding the demo open. `wait
+# "$RUNTIME_PID"` blocks until that process exits (normally, or via the
+# signal that fires the trap below), and stays interruptible by Ctrl-C
+# throughout.
 wait "$RUNTIME_PID" || true
 echo
 echo "Trustvian runtime exited."
