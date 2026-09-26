@@ -114,15 +114,38 @@ log "runtime at $API_URL"
 start_mocks
 log "mock services on $MOCK_PORT"
 
-create_control_plane
-log "control-plane objects created"
+REFERENCE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * REFERENCE_ACTIONS ))
+CANDIDATE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * CANDIDATE_ACTIONS ))
 
-run_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-               "reference" "$REFERENCE_ACTIONS" "fixture"
+# Both runs go through the same wrapper `make demo` uses, with the same
+# options. A smoke test that drove a private code path would be asserting
+# something nobody runs.
+#
+# The fixture's activity is fixed, so the expected count is stated
+# arithmetically rather than read back from the workload's own report: that is
+# the stronger check here, because it would catch a fixture that silently did
+# less. The model-driven agent gets --expect-records-from instead, since its
+# activity is not knowable in advance.
+smoke_run() {
+    local run_id="$1" candidate="$2" profile="$3" mode="$4" expected="$5"
+    SUPPORT_AGENT_PORT="$MOCK_PORT" \
+    SUPPORT_AGENT_MODE="$mode" \
+    SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+        "$DEMO_ROOT/scripts/tv-dev.sh" \
+            --api-url "$API_URL" \
+            --run-id "$run_id" \
+            --candidate "$candidate" \
+            --behavioral-profile "$profile" \
+            --expect-records "$expected" \
+            -- "$VENV_DIR/bin/python" "$DEMO_ROOT/fixtures/deterministic_agent.py"
+}
+
+smoke_run "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
+          "reference" "$REFERENCE_EXPECTED"
 log "reference run complete"
 
-run_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-               "candidate" "$CANDIDATE_ACTIONS" "fixture"
+smoke_run "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
+          "candidate" "$CANDIDATE_EXPECTED"
 log "candidate run complete"
 
 compare_runs
@@ -136,9 +159,6 @@ log "comparison written to $COMPARISON_FILE"
 # ---------------------------------------------------------------------
 echo
 echo "Assertions"
-
-REFERENCE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * REFERENCE_ACTIONS ))
-CANDIDATE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * CANDIDATE_ACTIONS ))
 
 reference_has_evidence() { [ "$(record_count "$REFERENCE_RUN")" -eq "$REFERENCE_EXPECTED" ]; }
 candidate_has_evidence() { [ "$(record_count "$CANDIDATE_RUN")" -eq "$CANDIDATE_EXPECTED" ]; }
