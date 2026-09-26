@@ -76,8 +76,28 @@ no_forbidden_dependencies() {
     ! grep -nEi '^[[:space:]]*(trustvian|opentelemetry)' "$target"
 }
 
+# tools/ is this repository's own tooling — a scenario runner, aggregation,
+# report rendering. It is not the application, it runs from a different
+# virtualenv, and nothing the agent runs may reach it. A fixture that imported
+# the runner would put a YAML parser and a control-plane client on the
+# application's import path, which is exactly what the two checks above exist
+# to prevent.
+no_tooling_on_the_agents_import_path() {
+    local target path rc=0
+    for target in $APPLICATION_SOURCES; do
+        path="$DEMO_ROOT/$target"
+        [ -r "$path" ] || continue
+        if grep -nE '^[[:space:]]*(import|from)[[:space:]]+tvdemo' "$path"; then
+            printf '        %s imports the tooling package above\n' "$target" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
 check "application sources mention neither trustvian nor opentelemetry, anywhere" no_forbidden_mentions
 check "agent/requirements.txt declares neither"                                          no_forbidden_dependencies
+check "no application source imports this repository's tooling"                          no_tooling_on_the_agents_import_path
 
 if [ "$FAILURES" -ne 0 ]; then
     echo
@@ -102,6 +122,16 @@ unit_tests_pass() {
 }
 check "agent unit tests pass" unit_tests_pass
 
+# Two suites, two interpreters, on purpose. The agent's tests need `requests`
+# and the tooling's need PyYAML, and no single environment has both — which is
+# the boundary those environments exist to draw. A suite that could only run
+# from an interpreter holding everything would be quietly asserting the
+# opposite.
+tooling_tests_pass() {
+    "$TOOLS_VENV_DIR/bin/python" -m unittest discover -s "$DEMO_ROOT/tools/tests" -q
+}
+check "tooling unit tests pass" tooling_tests_pass
+
 if [ "$FAILURES" -ne 0 ]; then
     echo
     echo "Unit tests failed; not running the lifecycle."
@@ -114,15 +144,38 @@ log "runtime at $API_URL"
 start_mocks
 log "mock services on $MOCK_PORT"
 
-create_control_plane
-log "control-plane objects created"
+REFERENCE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * REFERENCE_ACTIONS ))
+CANDIDATE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * CANDIDATE_ACTIONS ))
 
-run_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-               "reference" "$REFERENCE_ACTIONS" "fixture"
+# Both runs go through the same wrapper `make demo` uses, with the same
+# options. A smoke test that drove a private code path would be asserting
+# something nobody runs.
+#
+# The fixture's activity is fixed, so the expected count is stated
+# arithmetically rather than read back from the workload's own report: that is
+# the stronger check here, because it would catch a fixture that silently did
+# less. The model-driven agent gets --expect-records-from instead, since its
+# activity is not knowable in advance.
+smoke_run() {
+    local run_id="$1" candidate="$2" profile="$3" mode="$4" expected="$5"
+    SUPPORT_AGENT_PORT="$MOCK_PORT" \
+    SUPPORT_AGENT_MODE="$mode" \
+    SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+        "$DEMO_ROOT/scripts/tv-dev.sh" \
+            --api-url "$API_URL" \
+            --run-id "$run_id" \
+            --candidate "$candidate" \
+            --behavioral-profile "$profile" \
+            --expect-records "$expected" \
+            -- "$VENV_DIR/bin/python" "$DEMO_ROOT/fixtures/deterministic_agent.py"
+}
+
+smoke_run "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
+          "reference" "$REFERENCE_EXPECTED"
 log "reference run complete"
 
-run_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-               "candidate" "$CANDIDATE_ACTIONS" "fixture"
+smoke_run "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
+          "candidate" "$CANDIDATE_EXPECTED"
 log "candidate run complete"
 
 compare_runs
@@ -136,9 +189,6 @@ log "comparison written to $COMPARISON_FILE"
 # ---------------------------------------------------------------------
 echo
 echo "Assertions"
-
-REFERENCE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * REFERENCE_ACTIONS ))
-CANDIDATE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * CANDIDATE_ACTIONS ))
 
 reference_has_evidence() { [ "$(record_count "$REFERENCE_RUN")" -eq "$REFERENCE_EXPECTED" ]; }
 candidate_has_evidence() { [ "$(record_count "$CANDIDATE_RUN")" -eq "$CANDIDATE_EXPECTED" ]; }

@@ -1,0 +1,43 @@
+# The live story: a real local model chooses each action.
+#
+# `make demo` narrates this same journey interactively. This file is the
+# unattended form of it — same agent, same tools, same comparison, no pauses.
+version: "1"
+name: support-demo
+description: >-
+  The support workflow driven by a local model. The candidate can reach one
+  more service, and the model decides when to use it.
+
+runs: 1
+
+command: [python, agent/main.py]
+
+services: [mocks]
+
+# A local Ollama must already be serving the model. This runner deliberately
+# does not start one: `make demo` does that through scripts/lib.sh, which is
+# careful to stop only a server it started itself, and a developer's own
+# Ollama must survive this repository.
+requires: [ollama]
+
+# How many turns the model takes is its own decision, so the agent reports
+# what it actually did and the wrapper waits for that. A predicted count here
+# would turn "the model took an extra turn" into a spurious failure.
+evidence: summary
+
+reference:
+  candidate: reference
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "3"
+
+candidate:
+  candidate: candidate
+  env:
+    SUPPORT_AGENT_MODE: candidate
+    SUPPORT_AGENT_ROUNDS: "3"
+
+gate:
+  max_added_behaviors: 0
+  max_block_decisions: 0
+  max_critical_risk_observations: 0

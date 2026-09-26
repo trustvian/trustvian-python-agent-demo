@@ -1,0 +1,11 @@
+# Dependencies of this repository's own tooling — the scenario runner, the
+# k/N aggregation, the report rendering and the benches under tools/.
+#
+# Installed into .demo/tools-venv, which is deliberately *not* the environment
+# the agent runs in. Keeping them apart is what lets this repository keep
+# saying that the interpreter the application runs under holds exactly its own
+# declared dependencies plus the OpenTelemetry runtime, and nothing else.
+#
+# Nothing under tools/ is ever on the agent's import path, and nothing in
+# agent/ or fixtures/ may import it.
+PyYAML==6.0.2

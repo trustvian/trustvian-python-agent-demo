@@ -15,10 +15,6 @@ echo
 "$DEMO_ROOT/scripts/bootstrap.sh"
 
 echo
-# The developer watches the model decide, so the agent's transcript goes to the
-# terminal as it happens rather than only to its log.
-AGENT_STREAM="yes"
-
 echo "LLM:   Ollama"
 echo "Model: $OLLAMA_MODEL_NAME"
 echo
@@ -34,7 +30,40 @@ log "local services ready on port $MOCK_PORT (crm/knowledge/mail/export .localho
 # about what the developer types into the browser, never about the platform
 # inventing entities: ingest into a run that does not exist, or one that is not
 # running, is refused — and should be.
-create_control_plane
+# One evaluation run is one invocation of scripts/tv-dev.sh, the stand-in for
+# Trustvian task 077's `trustvian dev`. It composes the Collector, the
+# OpenTelemetry environment and the run lifecycle around a command it does not
+# modify — here, the model-driven agent.
+#
+# How much evidence to wait for is read from the agent's own run summary
+# rather than computed: the model decides how many turns to take, so the
+# number cannot be known in advance.
+tv_dev() {
+    local run_id="$1" candidate="$2" profile="$3" mode="$4"
+    SUPPORT_AGENT_PORT="$MOCK_PORT" \
+    SUPPORT_AGENT_MODE="$mode" \
+    SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+    OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
+        "$DEMO_ROOT/scripts/tv-dev.sh" \
+            --api-url "$API_URL" \
+            --run-id "$run_id" \
+            --candidate "$candidate" \
+            --behavioral-profile "$profile" \
+            --summary-file "$RUNTIME_DIR/agent-$mode-summary.json" \
+            --expect-records-from "$RUNTIME_DIR/agent-$mode-summary.json" \
+            --wait-timeout 120 \
+            --stream \
+            -- "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py"
+}
+
+# The hierarchy exists before any telemetry does, and before the browser is
+# opened. Zero-input is a statement about what the developer types, never
+# about the platform inventing entities: ingest into a run that does not
+# exist, or one that is not running, is refused — and should be.
+"$DEMO_ROOT/scripts/tv-dev.sh" hierarchy --api-url "$API_URL" \
+    --candidate "$REFERENCE_CANDIDATE" >/dev/null
+"$DEMO_ROOT/scripts/tv-dev.sh" hierarchy --api-url "$API_URL" \
+    --candidate "$CANDIDATE_CANDIDATE" >/dev/null
 log "project $PROJECT_ID, agent $AGENT_ID, candidates $REFERENCE_CANDIDATE and $CANDIDATE_CANDIDATE"
 
 echo
@@ -54,12 +83,10 @@ if live_view_available; then
 else
     LIVE_VIEW="no"
     cat <<'NOTE'
-  This Trustvian build does not serve the zero-input Live view (task 074:
-  specified, not implemented). The demo below is unaffected — the agent, the
-  telemetry and the comparison are all real — but the browser cannot discover
-  the run on its own yet.
-
-  To watch it in this build, navigate by ID instead:
+  This Trustvian build does not serve the zero-input Live view's collection
+  routes. The demo below is unaffected — the agent, the telemetry and the
+  comparison are all real — but the browser cannot discover the run on its
+  own, so navigate by ID instead:
       Open tab -> Open by ID -> Evaluation run ID
 NOTE
     echo "      $REFERENCE_RUN   (then $CANDIDATE_RUN for the second run)"
@@ -69,10 +96,8 @@ pause "Press ENTER when the browser is open..."
 
 echo "REFERENCE"
 echo
-begin_evaluation "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE"
-observe_agent "$REFERENCE_RUN" "reference" "$REFERENCE_ACTIONS" "agent" "summary"
-end_evaluation "$REFERENCE_RUN"
-REFERENCE_STEPS="$(agent_steps)"
+tv_dev "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" "reference"
+REFERENCE_STEPS="$(agent_steps "$RUNTIME_DIR/agent-reference-summary.json")"
 echo
 log "reference run completed: $(record_count "$REFERENCE_RUN") observations, $(distinct_behaviors "$REFERENCE_RUN") behaviors"
 
@@ -88,10 +113,8 @@ pause "Press ENTER to run the candidate..."
 
 echo "CANDIDATE"
 echo
-begin_evaluation "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE"
-observe_agent "$CANDIDATE_RUN" "candidate" "$CANDIDATE_ACTIONS" "agent" "summary"
-end_evaluation "$CANDIDATE_RUN"
-CANDIDATE_STEPS="$(agent_steps)"
+tv_dev "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" "candidate"
+CANDIDATE_STEPS="$(agent_steps "$RUNTIME_DIR/agent-candidate-summary.json")"
 echo
 log "candidate run completed: $(record_count "$CANDIDATE_RUN") observations, $(distinct_behaviors "$CANDIDATE_RUN") behaviors"
 

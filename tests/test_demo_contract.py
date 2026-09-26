@@ -11,6 +11,7 @@ asserted here, where CI sees them.
 No test in this file runs a model, a server or a shell script.
 """
 
+import os
 import subprocess
 import sys
 import unittest
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
 DEMO = ROOT / "scripts" / "demo.sh"
 SMOKE = ROOT / "scripts" / "smoke.sh"
+TVDEV = ROOT / "scripts" / "tv-dev.sh"
 
 
 def body_of(path: Path) -> str:
@@ -34,6 +36,13 @@ def body_of(path: Path) -> str:
         line for line in path.read_text().splitlines()
         if not line.lstrip().startswith("#")
     )
+
+
+def function_body(path: Path, name: str) -> str:
+    """One shell function's body, comments and all."""
+    source = path.read_text()
+    start = source.index(f"{name}() {{")
+    return source[start:source.index("\n}", start)]
 
 
 class NonInteractiveSmokeTest(unittest.TestCase):
@@ -123,31 +132,107 @@ class ApplicationDependencyTest(unittest.TestCase):
             self.assertNotIn(forbidden, declared)
 
 
-class EvaluationPhaseTest(unittest.TestCase):
-    """The interactive demo needs the lifecycle in separable phases."""
+class WrapperContractTest(unittest.TestCase):
+    """Both entry points go through one wrapper, shaped like task 077."""
 
-    def test_lib_exposes_the_three_phases(self):
-        lib = LIB.read_text()
-        for fn in ("begin_evaluation()", "observe_agent()", "end_evaluation()"):
-            self.assertIn(fn, lib)
+    def test_the_wrapper_exists_and_is_executable(self):
+        self.assertTrue(TVDEV.exists(), "scripts/tv-dev.sh is missing")
+        self.assertTrue(os.access(TVDEV, os.X_OK), "scripts/tv-dev.sh is not executable")
 
-    def test_run_evaluation_still_composes_them(self):
-        # smoke.sh calls run_evaluation, so the one-call form must survive the
-        # split rather than being replaced by it.
-        lib = LIB.read_text()
-        start = lib.index("run_evaluation() {")
-        body = lib[start:lib.index("\n}", start)]
-        for fn in ("begin_evaluation", "observe_agent", "end_evaluation"):
-            self.assertIn(fn, body)
+    def test_the_wrapper_is_valid_under_bash_3_2(self):
+        # /bin/bash on macOS is 3.2.57, and CI runs a modern bash; a construct
+        # only one accepts would break exactly one of them.
+        for shell in ("/bin/bash", "bash"):
+            with self.subTest(shell=shell):
+                proc = subprocess.run([shell, "-n", str(TVDEV)],
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_both_entry_points_use_it(self):
+        # A smoke test that drove a private code path would be asserting
+        # something nobody runs.
+        for script in (DEMO, SMOKE):
+            with self.subTest(script=script.name):
+                self.assertIn("tv-dev.sh", body_of(script))
+
+    def test_the_wrapper_takes_its_workload_after_a_double_dash(self):
+        # The property that lets a developer point this at their own agent,
+        # which is the whole reason the wrapper exists.
+        body = body_of(TVDEV)
+        self.assertIn('CHILD=("$@")', body)
+
+    def test_the_wrapper_never_pauses(self):
+        # It is called from CI, from the stability sweep and from the bench.
+        body = body_of(TVDEV)
+        self.assertNotIn("pause ", body)
+        for form in ("read -r", "read -p"):
+            self.assertNotIn(form, body, f"tv-dev.sh must not block on {form!r}")
+
+    def test_a_failed_workload_fails_its_run_instead_of_completing_it(self):
+        # A workload that crashed produced no verdict, not a passing one. The
+        # exit-3-versus-1 distinction the CI gate depends on starts here.
+        body = body_of(TVDEV)
+        self.assertIn("eval fail", body)
+        self.assertIn("CHILD_STATUS", body)
+
+    def test_the_otel_environment_is_composed_in_exactly_one_place(self):
+        # The application never sets these and never sees them in its
+        # manifest; exactly one file supplies them, at launch.
+        marker = "OTEL_EXPORTER_OTLP_ENDPOINT"
+        self.assertIn(marker, TVDEV.read_text())
+        for other in (LIB, DEMO, SMOKE):
+            with self.subTest(script=other.name):
+                self.assertNotIn(marker, other.read_text())
+
+    def test_the_stable_semconv_opt_in_is_set(self):
+        # Without it the instrumentation emits legacy http.url/http.method,
+        # Trustvian's processor reads server.address, and every span arrives
+        # with an empty target — collapsing the observed behaviors.
+        self.assertIn("OTEL_SEMCONV_STABILITY_OPT_IN", TVDEV.read_text())
+
+
+class CapabilityProbeTest(unittest.TestCase):
+    """Every Trustvian capability is asked for at runtime, never assumed."""
 
     def test_the_live_view_capability_is_probed_over_http(self):
         # Asked of the running server, not grepped out of a checkout: the
         # route either answers or it does not.
-        lib = LIB.read_text()
-        start = lib.index("live_view_available() {")
-        body = lib[start:lib.index("\n}", start)]
+        body = function_body(LIB, "live_view_available")
         self.assertIn("/v1/projects", body)
         self.assertIn("curl", body)
+
+    def test_the_cli_capabilities_are_probed_by_asking_the_binary(self):
+        for name in ("supports_environments", "trustvian_dev_available",
+                     "scenario_runner_available"):
+            with self.subTest(probe=name):
+                body = function_body(LIB, name)
+                self.assertIn("--help", body)
+                self.assertIn("$BIN_DIR/trustvian", body)
+
+    def test_semantic_fidelity_is_probed_from_a_control_plane_response(self):
+        # Task 075's arrival is visible in what the server answers, not in
+        # the source of the sibling checkout.
+        body = function_body(LIB, "tool_fidelity_in")
+        self.assertIn("operation_category", body)
+        self.assertIn("behavior_diff", body)
+
+    def test_no_probe_reads_the_trustvian_checkout(self):
+        # bootstrap.sh legitimately inspects the checkout to decide whether it
+        # can build at all. A *capability* probe must not: a source grep stops
+        # being true the moment the file moves.
+        lib = LIB.read_text()
+        self.assertNotIn("TRUSTVIAN_DIR", lib)
+
+
+class WrapperStandInTest(unittest.TestCase):
+    """The wrapper is a stand-in, and says so where someone will see it."""
+
+    def test_it_names_the_task_it_stands_in_for(self):
+        self.assertIn("077", TVDEV.read_text())
+
+    def test_it_reports_when_the_real_command_has_shipped(self):
+        body = body_of(TVDEV)
+        self.assertIn("trustvian_dev_available", body)
 
 
 if __name__ == "__main__":
