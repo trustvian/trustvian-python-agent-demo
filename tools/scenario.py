@@ -71,6 +71,18 @@ def main(argv=None) -> int:
 
     if args.results:
         print(f"\nresults written to {engine.write_results(args.results)}")
+
+    # Said plainly, because a bare exit 1 from a build tool reads as a broken
+    # run. It is not: 1 is the gate's own verdict, and the code that means
+    # "something went wrong" is 3.
+    print()
+    if status == runner.EXIT_GATE_FAIL:
+        print("gate FAIL. Exit 1 is the gate's verdict under the limits this")
+        print("scenario declared — not a broken run, and not a finding that the")
+        print("candidate is unsafe, malicious or compromised. An API or network")
+        print("failure would be exit 3.")
+    else:
+        print("gate PASS. Exit 0.")
     return status
 
 

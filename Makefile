@@ -24,7 +24,12 @@ scenario: ## Run one behavioral scenario: make scenario SCENARIO=scenarios/<name
 	@./scripts/bootstrap.sh >/dev/null
 	@.demo/tools-venv/bin/python tools/scenario.py \
 		"$(or $(SCENARIO),scenarios/support-fixture.yaml)" \
-		--results .demo/scenario-results.json
+		--results .demo/scenario-results.json; \
+	status=$$?; \
+	if [ $$status -eq 1 ]; then \
+		echo "make: the recipe below exited 1 because the gate said FAIL."; \
+	fi; \
+	exit $$status
 
 bootstrap: ## Build Trustvian binaries and create the demo Python environment
 	@./scripts/bootstrap.sh
