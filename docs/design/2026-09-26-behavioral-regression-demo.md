@@ -276,10 +276,19 @@ The 075 probe reads the control plane's own answer rather than grepping
 source, which is what lets the README's limit note and the Phase 5 scenario
 both flip automatically when 075 lands.
 
-`scripts/tv-dev.sh` and the scenario runner each **delegate to the Trustvian
-command when the probe finds one** and run their own composition otherwise,
-saying which path they took. Both are explicitly stand-ins to be deleted when
-077 and 078 ship.
+Both `scripts/tv-dev.sh` and the scenario runner are explicitly stand-ins, to
+be deleted when 077 and 078 ship.
+
+**They detect the real command and say so; they do not call it.** The plan was
+to delegate, and that is not yet writable: neither task has shipped, so
+neither flag spelling exists. 077 leaves its command name open and 078 leaves
+its subcommand's shape open, so a delegation written today would be a guess
+that breaks on the day it is supposed to start working — worse than no
+delegation, because it would look like a supported path. Each stand-in
+therefore prints, on every invocation where the probe fires, that the real
+command has shipped and that it should now be retired. Delegation becomes
+possible, and becomes a one-line change, the moment there is an interface to
+delegate to.
 
 ## Phase 1 — Shape the orchestration like the product
 

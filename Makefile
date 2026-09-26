@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke bootstrap clean
+.PHONY: help demo smoke scenario bootstrap clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -19,6 +19,17 @@ demo: ## Run the full reference demo and leave the runtime up for inspection
 
 smoke: ## Run the same path non-interactively and assert every guarantee
 	@./scripts/smoke.sh
+
+scenario: ## Run one behavioral scenario: make scenario SCENARIO=scenarios/<name>.yaml
+	@./scripts/bootstrap.sh >/dev/null
+	@.demo/tools-venv/bin/python tools/scenario.py \
+		"$(or $(SCENARIO),scenarios/support-fixture.yaml)" \
+		--results .demo/scenario-results.json; \
+	status=$$?; \
+	if [ $$status -eq 1 ]; then \
+		echo "make: the recipe below exited 1 because the gate said FAIL."; \
+	fi; \
+	exit $$status
 
 bootstrap: ## Build Trustvian binaries and create the demo Python environment
 	@./scripts/bootstrap.sh
