@@ -1,0 +1,48 @@
+# The model-free scenario. This is the one CI can run.
+#
+# Shaped after Trustvian task 078's illustrative scenario file, plus the
+# `runs` field that task's objective calls for. Every gate limit is stated:
+# zero is the strictest limit there is, so an omitted one must never default
+# to it.
+version: "1"
+name: support-fixture
+description: >-
+  The support workflow with no model in it. Deterministic, so its record
+  counts are exact and its gate result is the same every time.
+
+# One repetition per side. The workload is deterministic, so repeating it
+# measures nothing — `runs` earns its keep on the model-driven scenarios,
+# where one execution is one sample of a distribution.
+runs: 1
+
+# `python` resolves to the demo-managed interpreter, not to whatever is first
+# on PATH: which Python runs decides which OpenTelemetry runtime is attached.
+command: [python, fixtures/deterministic_agent.py]
+
+# The local world this workload talks to.
+services: [mocks]
+
+# The fixture's activity is fixed, so each side states how much evidence to
+# expect. That is the stronger check: it would catch a workload that silently
+# did less. A model-driven scenario uses `evidence: summary` instead, because
+# how many turns a model takes is not knowable in advance.
+evidence: records
+
+reference:
+  candidate: reference
+  records: 27
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "3"
+
+candidate:
+  candidate: candidate
+  records: 36
+  env:
+    SUPPORT_AGENT_MODE: candidate
+    SUPPORT_AGENT_ROUNDS: "3"
+
+gate:
+  max_added_behaviors: 0
+  max_block_decisions: 0
+  max_critical_risk_observations: 0

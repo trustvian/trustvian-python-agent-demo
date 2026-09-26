@@ -76,8 +76,28 @@ no_forbidden_dependencies() {
     ! grep -nEi '^[[:space:]]*(trustvian|opentelemetry)' "$target"
 }
 
+# tools/ is this repository's own tooling — a scenario runner, aggregation,
+# report rendering. It is not the application, it runs from a different
+# virtualenv, and nothing the agent runs may reach it. A fixture that imported
+# the runner would put a YAML parser and a control-plane client on the
+# application's import path, which is exactly what the two checks above exist
+# to prevent.
+no_tooling_on_the_agents_import_path() {
+    local target path rc=0
+    for target in $APPLICATION_SOURCES; do
+        path="$DEMO_ROOT/$target"
+        [ -r "$path" ] || continue
+        if grep -nE '^[[:space:]]*(import|from)[[:space:]]+tvdemo' "$path"; then
+            printf '        %s imports the tooling package above\n' "$target" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
 check "application sources mention neither trustvian nor opentelemetry, anywhere" no_forbidden_mentions
 check "agent/requirements.txt declares neither"                                          no_forbidden_dependencies
+check "no application source imports this repository's tooling"                          no_tooling_on_the_agents_import_path
 
 if [ "$FAILURES" -ne 0 ]; then
     echo
@@ -101,6 +121,16 @@ unit_tests_pass() {
     "$VENV_DIR/bin/python" -m unittest discover -s "$DEMO_ROOT/tests" -q
 }
 check "agent unit tests pass" unit_tests_pass
+
+# Two suites, two interpreters, on purpose. The agent's tests need `requests`
+# and the tooling's need PyYAML, and no single environment has both — which is
+# the boundary those environments exist to draw. A suite that could only run
+# from an interpreter holding everything would be quietly asserting the
+# opposite.
+tooling_tests_pass() {
+    "$TOOLS_VENV_DIR/bin/python" -m unittest discover -s "$DEMO_ROOT/tools/tests" -q
+}
+check "tooling unit tests pass" tooling_tests_pass
 
 if [ "$FAILURES" -ne 0 ]; then
     echo

@@ -79,6 +79,10 @@ demo_init() {
     DEMO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     BIN_DIR="$DEMO_ROOT/.demo/bin"
     VENV_DIR="$DEMO_ROOT/.demo/venv"
+    # This repository's own tooling runs from its own interpreter. Keeping it
+    # out of VENV_DIR is what lets the agent's environment stay exactly its
+    # declared dependencies plus the OpenTelemetry runtime.
+    TOOLS_VENV_DIR="$DEMO_ROOT/.demo/tools-venv"
     STATE_DIR="$DEMO_ROOT/.trustvian"
     RUNTIME_DIR="$DEMO_ROOT/.runtime"
     mkdir -p "$RUNTIME_DIR"
