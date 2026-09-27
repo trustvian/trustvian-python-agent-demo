@@ -20,7 +20,9 @@ N = 10, in two learning configurations.
 
 ### 2. The false-FAIL rate under the current task 056 gates at N = 1
 
-**Zero.** 0 of 9 adjacent pairs, 0 of 90 ordered pairs, in both configurations.
+**Zero.** 0 of 9 adjacent pairs, 0 of 90 ordered pairs, in both configurations —
+and **still zero at temperature 1.3**, in a second sweep of the same size run
+specifically to test whether 0.7 was the reason.
 
 ### 3. The rate under the proposed gates at N ≥ 5
 
@@ -58,6 +60,14 @@ a method and a destination, the reference toolset has three tools on three hosts
 the model call is the fourth, and the prompt requires all three actions for each
 of three tickets. A behavior could only go missing if the model skipped one tool
 for every ticket in a run.
+
+**The second sweep is what turns that from an argument into a measurement.** At
+temperature 1.3 the agent became visibly less deterministic — four of ten runs
+took two to four extra turns, against one of ten at 0.7 — and the behavior set was
+four in every one of the forty model-driven runs across both sweeps, with the FAIL
+rate 0/9 and 0/90 in all four configuration-temperature combinations. Turn-count
+nondeterminism nearly doubled and the gate did not notice, because the gate reads
+the behavior set and the behavior set was saturated.
 
 **So the honest conclusion is narrower than either side of 078's question:**
 

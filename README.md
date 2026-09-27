@@ -238,6 +238,18 @@ empty. Nothing dev owns is deleted to achieve that.
 Measured results are committed under [docs/results/](docs/results/) with the
 model, temperature, N, host, Ollama version and Trustvian commit.
 
+**Do not run `make smoke`, `make demo` or `make scenario` while a sweep is
+running.** They all start a control plane in this directory's `.trustvian/`, and
+`start_runtime` deliberately *stops* one it finds there so that a second
+`make demo` works instead of refusing. A sweep in progress loses its control
+plane. Measured the hard way: a concurrent `make smoke` killed a 20-run sweep at
+repetition 19.
+
+What it does **not** do is report a partial rate. The sweep stops with exit 3 and
+says a run was failed rather than completed — "nothing downstream may read it as
+evidence, so the sweep stops rather than reporting a rate over a smaller N than
+it claims." An operational failure is not a measurement.
+
 ### The simulated variant, for CI
 
 ```bash
