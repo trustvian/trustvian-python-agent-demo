@@ -1,0 +1,60 @@
+# SIMULATION — the stability measurement path, with no model in it.
+#
+# This exists so CI can exercise N repetitions, presence counting and adjacent-pair
+# comparison without Ollama. fixtures/stochastic_agent.py is a seeded RNG choosing
+# from a fixed list of actions. It is NOT an agent, and nothing it produces is
+# ever published as evidence about one. Every figure in docs/results/ comes from
+# the real local model through scenarios/stability.yaml.
+#
+# Trustvian task 078's "Measurement before implementation" section requires this
+# number before the k-of-N machinery is built, and says the measurement is
+# allowed to refute the amendment. It runs the *reference* side only — the same
+# commit, the same toolset, the same prompt — N times, and compares those runs
+# against each other.
+#
+# Temperature is meaningless here — there is no model to sample from. The sweep
+# still sets it, and still records it, because the report's shape is the same one
+# the real measurement produces.
+version: "1"
+name: stability-simulation
+description: >-
+  SIMULATION. A seeded, model-free workload run N times against itself, so the
+  measurement path itself can be tested. Not evidence about any agent.
+
+# Four, not ten: this is a shape test for CI, not a measurement, and CI's time is
+# better spent elsewhere. Overridden by --runs.
+runs: 4
+
+command: [opentelemetry-instrument, python, fixtures/stochastic_agent.py]
+
+services: [mocks]
+requires: []
+
+instrumentation: existing
+
+# The simulation's call count varies with its seed, so nothing predicts one.
+evidence: summary
+
+# Both sides name the same candidate, and the sweep overrides it anyway: it
+# allocates a fresh candidate namespace per invocation, and per repetition in the
+# isolated configuration. dev's learned baseline is a file that persists across
+# invocations, so a reused candidate id would start from whatever a previous
+# sweep taught it.
+reference:
+  candidate: stability-simulation
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "3"
+
+candidate:
+  candidate: stability-simulation
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "3"
+
+# The limits a developer would actually set, so the FAIL rate measured is the one
+# they would experience. Zero added behaviors is the strictest there is.
+gate:
+  max_added_behaviors: 0
+  max_block_decisions: 0
+  max_critical_risk_observations: 0

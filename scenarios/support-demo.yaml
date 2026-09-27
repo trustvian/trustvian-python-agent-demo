@@ -10,7 +10,10 @@ description: >-
 
 runs: 1
 
-command: [python, agent/main.py]
+command: [opentelemetry-instrument, python, agent/main.py]
+
+# See scenarios/support-fixture.yaml for why this is stated rather than inferred.
+instrumentation: existing
 
 services: [mocks]
 
@@ -20,9 +23,11 @@ services: [mocks]
 # Ollama must survive this repository.
 requires: [ollama]
 
-# How many turns the model takes is its own decision, so the agent reports
-# what it actually did and the wrapper waits for that. A predicted count here
-# would turn "the model took an extra turn" into a spurious failure.
+# How many turns the model takes is its own decision, so nothing here predicts a
+# count. A predicted count would turn "the model took an extra turn" into a
+# spurious failure. trustvian dev needs no prediction either way — it flushes the
+# Collector before the run goes terminal, so the evidence has landed when it
+# exits.
 evidence: summary
 
 reference:

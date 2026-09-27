@@ -83,11 +83,13 @@ class Mocks:
 
 
 class Runtime:
-    """The Trustvian control plane, started through scripts/tv-dev.sh.
+    """The Trustvian control plane, started through scripts/runtime.sh.
 
     Started once and attached to by every run, rather than once per run:
-    `runs: N` means N invocations of the wrapper, and N control planes would
-    be N databases with nothing to compare across.
+    `runs: N` means N invocations of `trustvian dev`, and N control planes would
+    be N databases with nothing to compare across. dev starts one of its own
+    when no --api-url is given and stops it on the way out, which is right for
+    one run and wrong for several.
     """
 
     def __init__(self, root, api_url=None):
@@ -99,7 +101,7 @@ class Runtime:
         if self.api_url:
             return self
         completed = subprocess.run(
-            [str(self.root / "scripts" / "tv-dev.sh"), "runtime", "up"],
+            [str(self.root / "scripts" / "runtime.sh"), "up"],
             capture_output=True, text=True)
         if completed.returncode != 0:
             raise WorldError(
@@ -110,7 +112,7 @@ class Runtime:
 
     def __exit__(self, *_):
         if self._started:
-            subprocess.run([str(self.root / "scripts" / "tv-dev.sh"), "runtime", "down"],
+            subprocess.run([str(self.root / "scripts" / "runtime.sh"), "down"],
                            capture_output=True, text=True)
         return False
 

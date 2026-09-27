@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke scenario bootstrap clean
+.PHONY: help demo smoke scenario stability bootstrap clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -31,9 +31,16 @@ scenario: ## Run one behavioral scenario: make scenario SCENARIO=scenarios/<name
 	fi; \
 	exit $$status
 
+stability: ## Measure how often an unchanged agent fails a gate against itself: make stability RUNS=10
+	@./scripts/bootstrap.sh >/dev/null
+	@.demo/tools-venv/bin/python tools/stability.py \
+		"$(or $(SCENARIO),scenarios/stability.yaml)" \
+		--runs "$(or $(RUNS),10)" \
+		--temperature "$(or $(TEMPERATURE),0.7)" \
+		--results .demo/stability-results.json
+
 bootstrap: ## Build Trustvian binaries and create the demo Python environment
 	@./scripts/bootstrap.sh
 
 clean: ## Remove every generated artifact, including the evaluation database
-	@rm -rf .demo .runtime .trustvian
-	@echo "Removed .demo/, .runtime/ and .trustvian/"
+	@./scripts/clean.sh

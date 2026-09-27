@@ -1,6 +1,7 @@
 """Tests for the planner. Uses a local stub HTTP server — never Ollama."""
 
 import json
+import os
 import sys
 import threading
 import unittest
@@ -244,3 +245,86 @@ class NextActionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TemperatureTest(unittest.TestCase):
+    """The knob a stability measurement needs, and its default.
+
+    The default matters as much as the knob: everything documented about the
+    reference run was measured at 0, and a story whose outcome changes between
+    readings is not a story.
+    """
+
+    def setUp(self):
+        self.session = requests.Session()
+        self.addCleanup(self.session.close)
+        # Saved and restored by hand rather than with mock.patch.dict, matching
+        # the rest of this file's plain-unittest style.
+        self.saved = os.environ.get("OLLAMA_TEMPERATURE")
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        if self.saved is None:
+            os.environ.pop("OLLAMA_TEMPERATURE", None)
+        else:
+            os.environ["OLLAMA_TEMPERATURE"] = self.saved
+
+    def given(self, value):
+        if value is None:
+            os.environ.pop("OLLAMA_TEMPERATURE", None)
+        else:
+            os.environ["OLLAMA_TEMPERATURE"] = value
+
+    def finishing_stub(self):
+        stub = StubOllama([json.dumps(
+            {"action": "finish", "customer_id": "", "query": "",
+             "email_subject": "", "email_body": "", "reason": "done"})])
+        self.addCleanup(stub.close)
+        return stub
+
+    def test_the_default_is_zero(self):
+        self.assertEqual(planner.DEFAULT_TEMPERATURE, 0.0)
+
+    def test_an_unset_variable_is_the_default(self):
+        self.given(None)
+        self.assertEqual(planner.temperature_from_environment(), 0.0)
+
+    def test_an_empty_variable_is_the_default(self):
+        # An exported-but-empty variable is what an unset shell variable looks
+        # like after `TEMPERATURE=$X make stability`, and it means "not given".
+        self.given("")
+        self.assertEqual(planner.temperature_from_environment(), 0.0)
+
+    def test_a_value_is_read(self):
+        self.given("0.7")
+        self.assertEqual(planner.temperature_from_environment(), 0.7)
+
+    def test_an_unparseable_value_is_fatal_rather_than_defaulted(self):
+        # The one failure mode that must not be silent. A typo falling back to 0
+        # would publish "an unchanged agent never fails a gate against itself"
+        # about a configuration nobody asked to measure.
+        for bad in ("warm", "0.7.1", "--"):
+            with self.subTest(value=bad):
+                self.given(bad)
+                with self.assertRaises(planner.PlannerError):
+                    planner.temperature_from_environment()
+
+    def test_a_negative_value_is_refused(self):
+        self.given("-1")
+        with self.assertRaises(planner.PlannerError):
+            planner.temperature_from_environment()
+
+    def test_the_temperature_reaches_the_model_request(self):
+        # The whole point: a knob that did not change the request would make
+        # every stability figure a measurement of temperature 0.
+        stub = self.finishing_stub()
+        planner.Planner(self.session, stub.url, temperature=0.7).next_action(
+            [{"role": "user", "content": "go"}], REF_TOOLS)
+        self.assertEqual(stub.requests[-1]["options"]["temperature"], 0.7)
+
+    def test_the_default_request_asks_for_zero(self):
+        stub = self.finishing_stub()
+        planner.Planner(self.session, stub.url).next_action(
+            [{"role": "user", "content": "go"}], REF_TOOLS)
+        self.assertEqual(stub.requests[-1]["options"]["temperature"], 0.0)

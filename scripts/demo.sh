@@ -14,6 +14,15 @@ echo
 
 "$DEMO_ROOT/scripts/bootstrap.sh"
 
+# Every workload here runs through `trustvian dev`. There is no fallback path,
+# so a build without it is reported now rather than in the middle of a run.
+require_trustvian_dev
+
+# The interactive demo shows the agent's transcript as it happens: watching the
+# model choose each action, beside what Trustvian reports observing, is most of
+# what the demo is for.
+AGENT_STREAM="yes"
+
 echo
 echo "LLM:   Ollama"
 echo "Model: $OLLAMA_MODEL_NAME"
@@ -26,45 +35,42 @@ log "control plane ready"
 start_mocks
 log "local services ready on port $MOCK_PORT (crm/knowledge/mail/export .localhost)"
 
-# The hierarchy exists before any telemetry does. Zero-input is a statement
-# about what the developer types into the browser, never about the platform
-# inventing entities: ingest into a run that does not exist, or one that is not
-# running, is refused — and should be.
-# One evaluation run is one invocation of scripts/tv-dev.sh, the stand-in for
-# Trustvian task 077's `trustvian dev`. It composes the Collector, the
-# OpenTelemetry environment and the run lifecycle around a command it does not
+# One evaluation run is one `trustvian dev` invocation. dev composes the
+# Collector and its configuration, the OpenTelemetry environment, the
+# control-plane hierarchy and the run lifecycle around a command it does not
 # modify — here, the model-driven agent.
 #
-# How much evidence to wait for is read from the agent's own run summary
-# rather than computed: the model decides how many turns to take, so the
-# number cannot be known in advance.
-tv_dev() {
-    local run_id="$1" candidate="$2" profile="$3" mode="$4"
+# --api-url attaches to the control plane started above rather than letting dev
+# start one of its own. Both are supported, and attaching is what this demo
+# needs: the two runs must land in one database to be comparable, and the
+# browser has to outlive the run it is looking at.
+#
+# There is no evidence wait here any more. dev stops the Collector before it
+# moves the run to a terminal state, which flushes what the Collector holds — so
+# by the time dev exits, the run holds everything the workload emitted. The
+# counts below are read back afterwards and reported; smoke.sh asserts them.
+dev_agent_run() {
+    local run_id="$1" candidate="$2" mode="$3"
     SUPPORT_AGENT_PORT="$MOCK_PORT" \
     SUPPORT_AGENT_MODE="$mode" \
     SUPPORT_AGENT_ROUNDS="$ROUNDS" \
+    SUPPORT_AGENT_SUMMARY="$RUNTIME_DIR/agent-$mode-summary.json" \
     OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
-        "$DEMO_ROOT/scripts/tv-dev.sh" \
-            --api-url "$API_URL" \
-            --run-id "$run_id" \
-            --candidate "$candidate" \
-            --behavioral-profile "$profile" \
-            --summary-file "$RUNTIME_DIR/agent-$mode-summary.json" \
-            --expect-records-from "$RUNTIME_DIR/agent-$mode-summary.json" \
-            --wait-timeout 120 \
-            --stream \
-            -- "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py"
+        dev_run "$run_id" "$candidate" "$RUNTIME_DIR/dev-$mode.log" \
+            "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py"
 }
 
-# The hierarchy exists before any telemetry does, and before the browser is
-# opened. Zero-input is a statement about what the developer types, never
-# about the platform inventing entities: ingest into a run that does not
-# exist, or one that is not running, is refused — and should be.
-"$DEMO_ROOT/scripts/tv-dev.sh" hierarchy --api-url "$API_URL" \
-    --candidate "$REFERENCE_CANDIDATE" >/dev/null
-"$DEMO_ROOT/scripts/tv-dev.sh" hierarchy --api-url "$API_URL" \
-    --candidate "$CANDIDATE_CANDIDATE" >/dev/null
+# The hierarchy exists before any telemetry does, and dev creates it — project,
+# agent, environment and candidate, each only where it is missing. Zero-input is
+# a statement about what the developer types, never about the platform inventing
+# entities from telemetry: ingest into a run that does not exist, or one that is
+# not running, is still refused.
+#
+# It therefore appears at the first run rather than before the browser opens,
+# which is one thing this demo gave up by retiring its own wrapper. The Live
+# view's own empty state is the honest thing to look at until then.
 log "project $PROJECT_ID, agent $AGENT_ID, candidates $REFERENCE_CANDIDATE and $CANDIDATE_CANDIDATE"
+log "created by trustvian dev at the first run"
 
 echo
 echo "─────────────────────────────────────────────"
@@ -96,7 +102,7 @@ pause "Press ENTER when the browser is open..."
 
 echo "REFERENCE"
 echo
-tv_dev "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" "reference"
+dev_agent_run "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "reference"
 REFERENCE_STEPS="$(agent_steps "$RUNTIME_DIR/agent-reference-summary.json")"
 echo
 log "reference run completed: $(record_count "$REFERENCE_RUN") observations, $(distinct_behaviors "$REFERENCE_RUN") behaviors"
@@ -113,7 +119,7 @@ pause "Press ENTER to run the candidate..."
 
 echo "CANDIDATE"
 echo
-tv_dev "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" "candidate"
+dev_agent_run "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "candidate"
 CANDIDATE_STEPS="$(agent_steps "$RUNTIME_DIR/agent-candidate-summary.json")"
 echo
 log "candidate run completed: $(record_count "$CANDIDATE_RUN") observations, $(distinct_behaviors "$CANDIDATE_RUN") behaviors"

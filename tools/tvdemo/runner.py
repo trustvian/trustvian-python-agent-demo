@@ -25,6 +25,12 @@ import sys
 
 from . import controlplane, world
 
+# The same identifiers scripts/lib.sh uses, so a scenario run and `make demo`
+# land in one hierarchy rather than two that look alike.
+PROJECT_ID = "support-demo"
+AGENT_ID = "support-agent"
+ENVIRONMENT_REF = "local"
+
 EXIT_PASS = 0
 EXIT_GATE_FAIL = 1
 EXIT_USAGE = 2
@@ -46,55 +52,98 @@ class Runner:
     # -- one repetition of one side ------------------------------------
 
     def _invoke(self, side, repetition, mock_port, api_url):
-        """One evaluation run, through the same wrapper `make demo` uses."""
+        """One evaluation run, through `trustvian dev`.
+
+        Every identity value is explicit. `--candidate` in particular: both
+        sides of a comparison are usually built from the same commit, and dev
+        derives the candidate from the commit, so leaving it out would give
+        them one candidate id and therefore one learning profile — the
+        candidate *is* the learning scope.
+
+        `--api-url` attaches to the control plane the caller started. N
+        repetitions against N control planes would be N databases with nothing
+        to compare across.
+        """
         run_id = side.run_id(self.scenario.name, repetition)
         summary = self.root / ".runtime" / f"{run_id}-summary.json"
 
         command = [
-            str(self.root / "scripts" / "tv-dev.sh"),
+            str(self.bin_dir / "trustvian"), "dev",
             "--api-url", api_url,
+            "--project", PROJECT_ID,
+            "--agent", AGENT_ID,
+            "--environment", ENVIRONMENT_REF,
+            "--candidate", side.candidate_for(repetition),
             "--run-id", run_id,
-            "--candidate", side.candidate,
-            "--behavioral-profile", f"{self.scenario.name}-{side.name}",
             "--instrumentation", self.scenario.instrumentation,
-            "--summary-file", str(summary),
-            "--wait-timeout", "180",
-        ]
-        if self.scenario.evidence == "records":
-            command += ["--expect-records", str(side.records)]
-        else:
-            command += ["--expect-records-from", str(summary)]
-        if self.stream:
-            command += ["--stream"]
-        command += ["--"] + [self._resolve(token) for token in side.command]
+            "--",
+        ] + [self._resolve(token) for token in side.command]
 
         environment = dict(**side.env)
         if mock_port is not None:
             environment["SUPPORT_AGENT_PORT"] = str(mock_port)
         environment["OLLAMA_MODEL"] = self.model
+        environment["SUPPORT_AGENT_SUMMARY"] = str(summary)
 
         import os
         child_env = dict(os.environ)
         child_env.update(environment)
+        child_env.setdefault("PYTHONPATH", str(self.root))
+        # dev resolves its two helpers flag -> environment -> beside the
+        # executable -> PATH, and this repository builds them somewhere that is
+        # none of those.
+        child_env["TRUSTVIAN_LOCAL_BIN"] = str(self.bin_dir / "trustvian-local")
+        child_env["TRUSTVIAN_COLLECTOR_BIN"] = str(self.bin_dir / "trustvian-collector")
 
+        output = None if self.stream else subprocess.DEVNULL
         completed = subprocess.run(
-            command, cwd=side.workdir or str(self.root), env=child_env)
+            command, cwd=side.workdir or str(self.root), env=child_env,
+            stdout=output, stderr=None)
         if completed.returncode != 0:
             raise world.WorldError(
-                f"the {side.name} workload (repetition {repetition}) did not "
-                f"produce evidence; run {run_id} was failed, not completed")
+                f"the {side.name} workload (repetition {repetition}) exited "
+                f"{completed.returncode} under trustvian dev; run {run_id} was "
+                f"failed, not completed")
         return run_id
 
     def _resolve(self, token):
-        """`python` in a scenario means the demo-managed interpreter.
+        """Resolve the two tokens a scenario is allowed to name abstractly.
 
-        Spelled out rather than left to PATH: which Python runs decides which
-        OpenTelemetry runtime is attached, and inheriting whatever happens to
-        be first on PATH is how a scenario silently stops being instrumented.
+        `python` is the demo-managed interpreter and
+        `opentelemetry-instrument` the zero-code launcher beside it. Spelled out
+        rather than left to PATH: which Python runs decides which OpenTelemetry
+        runtime is attached, and inheriting whatever happens to be first on PATH
+        is how a scenario silently stops being instrumented.
+
+        The wrapper is part of the scenario's command rather than something the
+        runner prepends, because that is what `--instrumentation existing` then
+        truthfully describes — dev configures OTLP and injects nothing, and the
+        command says where the instrumentation comes from.
         """
         if token == "python":
             return str(self.venv_python)
+        if token == "opentelemetry-instrument":
+            return str(self.root / ".demo" / "venv" / "bin" / "opentelemetry-instrument")
         return token
+
+    def _assert_evidence(self, plane, run_id, side, repetition):
+        """Check the run holds the evidence the scenario predicted.
+
+        dev has no evidence wait and needs none: it stops the Collector before
+        moving the run to a terminal state, which flushes what the Collector
+        holds. So a predicted count is checked *afterwards*, as an equality —
+        stronger than the lower-bound wait this repository used before, which
+        could not notice a workload that did more than expected.
+        """
+        if side.records is None:
+            return
+        progress = plane.progress(run_id)
+        actual = int(progress["record_count"])
+        if actual != side.records:
+            raise world.WorldError(
+                f"run {run_id} ({side.name}, repetition {repetition}) holds "
+                f"{actual} records, and the scenario predicted {side.records}. "
+                f"Its status is {progress['status']!r}.")
 
     # -- the whole scenario --------------------------------------------
 
@@ -123,7 +172,9 @@ class Runner:
             if scenario.runs > 1:
                 print(f"\nrepetition {repetition} of {scenario.runs}")
             reference = self._invoke(scenario.reference, repetition, port, api_url)
+            self._assert_evidence(plane, reference, scenario.reference, repetition)
             candidate = self._invoke(scenario.candidate, repetition, port, api_url)
+            self._assert_evidence(plane, candidate, scenario.candidate, repetition)
 
             status, payload = plane.compare(reference, candidate, scenario.gate)
 

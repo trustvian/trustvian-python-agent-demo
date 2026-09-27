@@ -32,6 +32,27 @@ GATE_LIMITS = (
 
 EVIDENCE_SOURCES = ("summary", "records")
 
+# `trustvian dev`'s own modes, and only those. The mode is passed through to it
+# verbatim, so a value it does not know would be a usage error from dev in the
+# middle of a scenario rather than here, before anything runs.
+#
+# dev's fourth mode, python-zero-code, is reserved and refused in this build —
+# the workloads here name opentelemetry-instrument in their own command instead,
+# which is what `existing` then truthfully describes.
+INSTRUMENTATION_MODES = ("existing", "none", "auto")
+
+# How the N repetitions of one side relate to each other's learned baseline.
+#
+# `shared` is what a developer gets by default: one candidate id, so one
+# learning scope, so repetition i is analyzed against a baseline that learned
+# from 1..i-1. `isolated` allocates a candidate per repetition, which is what
+# Trustvian task 078 specifies for scenario suites — its presence counts must
+# measure the workload's nondeterminism, not the order the repetitions ran in.
+#
+# Both are real configurations answering different questions, so neither is
+# hidden behind the other.
+LEARNING_MODES = ("shared", "isolated")
+
 
 class ScenarioError(Exception):
     """The scenario file cannot be used.
@@ -52,9 +73,27 @@ class Side:
     command: list
     workdir: str | None
     records: int | None
+    learning: str
 
     def run_id(self, scenario: str, repetition: int) -> str:
         return f"{scenario}-{self.name}-{repetition}"
+
+    def candidate_for(self, repetition: int) -> str:
+        """The candidate id this repetition runs under.
+
+        The candidate *is* the learning scope, so this is the only lever that
+        decides whether the repetitions learn from each other. Under `isolated`
+        each gets its own; under `shared` they all share one.
+
+        The repetition index appears in an identifier here and nowhere else.
+        Task 078 is explicit that the index is correlation metadata and never
+        behavioral identity — a profile ref is an opaque string the engine never
+        parses, so encoding an index in one is a runner convenience, not a
+        contract.
+        """
+        if self.learning == "isolated":
+            return f"{self.candidate}-rep-{repetition}"
+        return self.candidate
 
 
 @dataclasses.dataclass(frozen=True)
@@ -64,6 +103,7 @@ class Scenario:
     runs: int
     evidence: str
     instrumentation: str
+    learning: str
     services: tuple
     requires: tuple
     gate: dict
@@ -83,7 +123,7 @@ def _require(document: dict, key: str, where: str):
 
 
 def _side(document: dict, name: str, shared_command: list, evidence: str,
-          where: str) -> Side:
+          learning: str, where: str) -> Side:
     raw = _require(document, name, where)
     if not isinstance(raw, dict):
         raise ScenarioError(f"{where}: {name!r} must be a mapping")
@@ -120,6 +160,7 @@ def _side(document: dict, name: str, shared_command: list, evidence: str,
         command=[str(c) for c in command],
         workdir=raw.get("workdir"),
         records=records,
+        learning=learning,
     )
 
 
@@ -157,6 +198,18 @@ def load(path) -> Scenario:
         raise ScenarioError(
             f"{where}: `evidence` must be one of {', '.join(EVIDENCE_SOURCES)}")
 
+    instrumentation = str(document.get("instrumentation", "existing"))
+    if instrumentation not in INSTRUMENTATION_MODES:
+        raise ScenarioError(
+            f"{where}: `instrumentation` must be one of "
+            f"{', '.join(INSTRUMENTATION_MODES)} — these are trustvian dev's own "
+            f"modes, and the value is passed to it unchanged")
+
+    learning = str(document.get("learning", "shared"))
+    if learning not in LEARNING_MODES:
+        raise ScenarioError(
+            f"{where}: `learning` must be one of {', '.join(LEARNING_MODES)}")
+
     gate = _require(document, "gate", where)
     if not isinstance(gate, dict):
         raise ScenarioError(f"{where}: `gate` must be a mapping")
@@ -185,11 +238,12 @@ def load(path) -> Scenario:
         description=str(document.get("description", "")),
         runs=runs,
         evidence=evidence,
-        instrumentation=str(document.get("instrumentation", "python-zero-code")),
+        instrumentation=instrumentation,
+        learning=learning,
         services=services,
         requires=requires,
         gate=limits,
-        reference=_side(document, "reference", shared_command, evidence, where),
-        candidate=_side(document, "candidate", shared_command, evidence, where),
+        reference=_side(document, "reference", shared_command, evidence, learning, where),
+        candidate=_side(document, "candidate", shared_command, evidence, learning, where),
         path=path,
     )
