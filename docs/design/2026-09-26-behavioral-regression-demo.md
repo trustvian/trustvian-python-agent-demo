@@ -342,6 +342,22 @@ produces today.
 
 ## Phase 2 — Repeatability and nondeterminism
 
+> **Status: implemented.** `make stability` exists, the temperature knob is in
+> `agent/planner.py`, the seeded simulation is in `fixtures/stochastic_agent.py`,
+> and the measured figures are in [`docs/results/`](../results/) with the
+> upstream contribution in [`docs/upstream/`](../upstream/).
+>
+> Two things this section did not anticipate, both recorded where they matter:
+>
+> - **`trustvian dev`'s learned baseline persists across invocations**, one file
+>   per candidate under its state directory. A sweep reusing a candidate id
+>   therefore inherits whatever previous sweeps taught it, so each sweep now
+>   allocates a fresh candidate namespace. Without that, "shared versus isolated"
+>   would have been contaminated by unrecorded history.
+> - **The shared/isolated distinction is directly visible in anomaly
+>   confidence**, which is what makes it measurable rather than argued about.
+
+
 **Temperature becomes configurable** through `OLLAMA_TEMPERATURE`, read in
 `agent/planner.py`, which today hard-codes `{"temperature": 0}`. `make demo`
 keeps 0.

@@ -200,7 +200,9 @@ def main() -> int:
     model = planner_mod.model_from_environment()
 
     session = CountingSession()
-    planner_obj = planner_mod.Planner(session, url, model=model)
+    temperature = planner_mod.temperature_from_environment()
+    planner_obj = planner_mod.Planner(session, url, model=model,
+                                      temperature=temperature)
 
     all_steps = []
     finished = False

@@ -111,3 +111,110 @@ class CommittedScenarioTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class LearningModeTest(ScenarioValidationTest):
+    """`learning` decides whether the N repetitions teach each other."""
+
+    def test_shared_is_the_default(self):
+        spec = self.load(MINIMAL)
+        self.assertEqual(spec.learning, "shared")
+        # One candidate id for every repetition, so one learning scope.
+        self.assertEqual(spec.reference.candidate_for(1),
+                         spec.reference.candidate_for(2))
+
+    def test_isolated_gives_each_repetition_its_own_candidate(self):
+        spec = self.load(MINIMAL + "learning: isolated\n")
+        first = spec.reference.candidate_for(1)
+        second = spec.reference.candidate_for(2)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.endswith("-rep-1"), first)
+
+    def test_an_unknown_learning_mode_is_a_usage_error(self):
+        with self.assertRaises(scenario_mod.ScenarioError) as caught:
+            self.load(MINIMAL + "learning: sometimes\n")
+        self.assertIn("learning", str(caught.exception))
+
+
+class InstrumentationModeTest(ScenarioValidationTest):
+    """The mode reaches `trustvian dev` unchanged, so it is dev's vocabulary."""
+
+    def test_existing_is_the_default(self):
+        self.assertEqual(self.load(MINIMAL).instrumentation, "existing")
+
+    def test_devs_own_modes_are_accepted(self):
+        for mode in ("existing", "none", "auto"):
+            with self.subTest(mode=mode):
+                spec = self.load(MINIMAL + f"instrumentation: {mode}\n")
+                self.assertEqual(spec.instrumentation, mode)
+
+    def test_a_mode_dev_does_not_know_is_refused_before_anything_runs(self):
+        # python-zero-code is reserved and refused by dev in this build. A
+        # scenario naming it would fail from dev in the middle of a run, which is
+        # later and less useful than failing here.
+        for mode in ("python-zero-code", "inject"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(scenario_mod.ScenarioError):
+                    self.load(MINIMAL + f"instrumentation: {mode}\n")
+
+
+class ThresholdTest(unittest.TestCase):
+    """The k a sweep reports, computed from presence counts alone."""
+
+    def counts(self, *runs_present):
+        return [{"runs_present": n} for n in runs_present]
+
+    def test_k_is_one_above_the_noisiest_varying_behavior(self):
+        from tvdemo import stability
+        # Two behaviors always present, one in three of five runs: a threshold of
+        # four would have reported nothing.
+        self.assertEqual(
+            stability.zero_false_fail_threshold(self.counts(5, 5, 3), 5), 4)
+
+    def test_no_threshold_is_reported_when_nothing_varied(self):
+        from tvdemo import stability
+        # Every behavior in every run means the single-run gate had nothing to
+        # absorb, and task 078 says that outcome must be reportable rather than
+        # rounded into a recommendation.
+        self.assertIsNone(
+            stability.zero_false_fail_threshold(self.counts(5, 5, 5), 5))
+
+    def test_a_behavior_seen_once_still_needs_a_threshold_above_it(self):
+        from tvdemo import stability
+        self.assertEqual(
+            stability.zero_false_fail_threshold(self.counts(10, 1), 10), 2)
+
+
+class SimulationLabellingTest(unittest.TestCase):
+    """The seeded fixture must be unmistakable for a model.
+
+    A seeded RNG read as evidence about a language model is the one way this
+    repository's stability numbers become dishonest, so the label is asserted
+    rather than trusted to reviewers.
+    """
+
+    def test_the_fixture_calls_itself_a_simulation(self):
+        source = (ROOT / "fixtures" / "stochastic_agent.py").read_text()
+        self.assertIn("SIMULATION", source)
+        # And at runtime, not only in a docstring nobody reads.
+        self.assertIn('print(f"  SIMULATION', source)
+
+    def test_the_simulation_scenario_says_so_too(self):
+        text = (ROOT / "scenarios" / "stability-simulation.yaml").read_text()
+        self.assertIn("SIMULATION", text)
+        self.assertIn("NOT an agent", text)
+
+    def test_the_simulation_requires_a_seed_with_no_default(self):
+        # An unseeded simulation is not reproducible, and a default seed would
+        # make every repetition identical and silently measure nothing.
+        source = (ROOT / "fixtures" / "stochastic_agent.py").read_text()
+        self.assertIn("SUPPORT_AGENT_SEED", source)
+        self.assertNotIn('os.environ.get("SUPPORT_AGENT_SEED", ', source)
+
+    def test_the_real_measurement_scenario_needs_a_model(self):
+        spec = scenario_mod.load(ROOT / "scenarios" / "stability.yaml")
+        self.assertTrue(spec.needs_a_model)
+        simulated = scenario_mod.load(
+            ROOT / "scenarios" / "stability-simulation.yaml")
+        self.assertFalse(simulated.needs_a_model)
