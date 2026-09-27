@@ -44,7 +44,7 @@ echo "Application isolation"
 # Explicit rather than a glob: adding an application file to this set is a
 # decision someone makes here, not something a new file inherits silently.
 APPLICATION_SOURCES="agent/main.py agent/planner.py agent/tools.py \
-agent/__init__.py fixtures/deterministic_agent.py"
+agent/__init__.py fixtures/deterministic_agent.py fixtures/stochastic_agent.py"
 
 # grep exits 1 when it read the file and matched nothing, and 2 when it
 # could not open the file at all — `!` only inverts zero-versus-nonzero, so

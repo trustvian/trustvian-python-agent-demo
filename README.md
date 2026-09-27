@@ -29,7 +29,7 @@ Each one is honest about what it proves.
 | `make demo` | The live story: a local model drives an agent, the candidate gains a behavior, the gate fails | Ollama `gemma3:4b` | **now** |
 | `make scenario` | The same journey as a declarative scenario file, unattended, usable from CI | no | **now** |
 | PR workflow | A PR that changes agent behavior gets a Trustvian comment and a failing check | no | phase 3 |
-| `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead | yes | phase 2 |
+| `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead | yes (a simulated variant needs none) | **now** |
 | `make injection-bench` | A prompt injection hidden in data changes behavior, and Trustvian catches it without reading content | yes | phase 4 |
 
 The phased rows are specified in
@@ -191,6 +191,67 @@ one run and wrong for several. Trustvian's own
 the parts separately* describes exactly this shape, and it is also task 078's CI
 path.
 
+## Stability: an unchanged agent against itself
+
+```bash
+make stability RUNS=10 TEMPERATURE=0.7
+```
+
+The number Trustvian
+[task 078](../trustvian/docs/tasks/v1.0/078-behavioral-scenario-suites.md) requires
+**before** its k-of-N machinery is implemented. That section says `k`, `j` and a
+default `N` are guesses until somebody measures a real agent — and that the
+measurement is allowed to refute the amendment.
+
+It runs the **reference side only**, unchanged, N times, and compares those runs
+against each other. Everything it reports is a control-plane response: each FAIL
+is a real `POST /v1/evaluations/compare`, and each behavior set came back from
+one. Where it counts how many of N runs showed a behavior it counts *responses*,
+under a heading that says **demo-side aggregation**.
+
+**Two configurations, because they answer different questions.**
+
+| | Learning scope | What it tells you |
+|---|---|---|
+| `shared` | one candidate for all N | what a developer gets by default — repetition *i* is analyzed against a baseline that already learned from 1..*i*−1 |
+| `isolated` | one candidate per repetition | what task 078 specifies for suites, so presence counts measure the workload's nondeterminism rather than the order the repetitions ran in |
+
+Both are reported. Neither is a default the other inherits, and reporting one
+would answer half of what 078 has to decide.
+
+**Temperature 0.7, not 0.** `make demo` keeps 0 because a story whose outcome
+changes between readings is not a story. But "how often does an unchanged agent
+fail a gate against itself" is not worth asking of a configuration nobody
+ships — 0.7 is a common application-level default, below Ollama's own server
+default of 0.8 and the OpenAI API's 1.0, so the figure is conservative rather
+than a worst case. `OLLAMA_TEMPERATURE` is read in `agent/planner.py`; an
+unparseable value is a hard failure, because a typo that quietly produced a
+temperature-0 sweep would publish "an unchanged agent never fails" about
+something nobody asked for.
+
+**A fresh candidate namespace per sweep.** `trustvian dev` keeps the learned
+baseline in a file per candidate, and it **persists across invocations** —
+measured: repeated runs under one candidate drive anomaly confidence to its
+maximum. So each sweep allocates its own candidate ids and every profile starts
+empty. Nothing dev owns is deleted to achieve that.
+
+Measured results are committed under [docs/results/](docs/results/) with the
+model, temperature, N, host, Ollama version and Trustvian commit.
+
+### The simulated variant, for CI
+
+```bash
+make stability SCENARIO=scenarios/stability-simulation.yaml RUNS=6
+```
+
+`fixtures/stochastic_agent.py` is a **seeded RNG choosing from a fixed list of
+actions**. It is not an agent, and nothing it produces is ever published as
+evidence about one. It exists because the measurement path — N repetitions,
+presence counting, adjacent-pair comparison — is orchestration that can break,
+and CI must be able to exercise it with no model. It is labelled a simulation in
+its filename, its own output, its scenario, its results and here, and a test
+asserts those labels.
+
 ## Scenarios
 
 A scenario file says how to run a workload, how many times, and what its
@@ -323,6 +384,7 @@ the control plane open for the WebUI until Ctrl-C by design.
 ```bash
 make demo        # the full interactive demo, leaves the runtime up
 make scenario    # run a scenario file unattended
+make stability   # measure an unchanged agent against itself: RUNS=10 TEMPERATURE=0.7
 make smoke       # every guarantee, asserted non-interactively, no model
 make bootstrap   # build Trustvian and create the Python environments
 make clean       # remove every generated artifact, including the database
@@ -476,7 +538,8 @@ agent/main.py              the application under observation
 agent/planner.py           asks the model for one action per turn, validates it
 agent/tools.py             the tool allowlist and dispatcher
 agent/requirements.txt     its declared dependencies — requests, and nothing else
-fixtures/                  the deterministic, model-free agent CI runs
+fixtures/deterministic_agent.py  the model-free driver CI runs
+fixtures/stochastic_agent.py     a SEEDED SIMULATION, never evidence about a model
 mock_services/server.py    deterministic local backend services
 scenarios/                 scenario files, task 078's shape
 scripts/lib.sh             shared primitives, dev_run, and the capability probes
@@ -485,10 +548,12 @@ scripts/runtime.sh         the control plane many runs attach to
 scripts/clean.sh           make clean
 scripts/demo.sh            make demo
 scripts/smoke.sh           make smoke
-tools/tvdemo/              the scenario runner and this repository's tooling
+tools/tvdemo/              the scenario runner, the stability sweep, this repo's tooling
+docs/results/              measured numbers, committed
 tests/                     the agent's unit tests
 tools/tests/               the tooling's unit tests
 docs/design/               what is being built, and why
+docs/upstream/             proposals for Trustvian, citing the task number
 ```
 
 ## Cleanup

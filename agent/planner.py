@@ -18,6 +18,19 @@ import os
 import requests
 
 DEFAULT_MODEL = "gemma3:4b"
+
+# Temperature 0 is this agent's default and stays it.
+#
+# Everything documented about the reference run — which actions the model picks,
+# how many turns it takes, the observed record counts — was measured at 0, and a
+# story whose outcome changes between readings is not a story.
+#
+# It is configurable because *measuring* nondeterminism needs a configuration
+# somebody would actually ship, and nobody ships an agent pinned at 0 to make its
+# behavior reproducible. 0.7 is a common application-level default, below
+# Ollama's own server default of 0.8 and the OpenAI API's 1.0, so instability
+# measured there is a conservative figure rather than a worst case.
+DEFAULT_TEMPERATURE = 0.0
 OLLAMA_HOST = "ollama.localhost"
 OLLAMA_PORT = 11434
 
@@ -43,6 +56,28 @@ def default_url() -> str:
 def model_from_environment() -> str:
     """The configured model, defaulting to the one this demo is built around."""
     return os.environ.get("OLLAMA_MODEL") or DEFAULT_MODEL
+
+
+def temperature_from_environment() -> float:
+    """The configured sampling temperature, defaulting to 0.
+
+    An unreadable value is a hard failure rather than a silent fall back to the
+    default. A stability measurement's whole output is a number that depends on
+    this one, and a typo that quietly produced a temperature-0 sweep would
+    publish "an unchanged agent never fails a gate" about a configuration nobody
+    asked for — which is the one result this must not report by accident.
+    """
+    raw = os.environ.get("OLLAMA_TEMPERATURE")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_TEMPERATURE
+    try:
+        value = float(raw)
+    except ValueError:
+        raise PlannerError(
+            f"OLLAMA_TEMPERATURE={raw!r} is not a number") from None
+    if value < 0:
+        raise PlannerError(f"OLLAMA_TEMPERATURE={raw!r} is negative")
+    return value
 
 
 def action_schema(tool_names) -> dict:
@@ -82,11 +117,13 @@ def action_schema(tool_names) -> dict:
 class Planner:
     """One model, one endpoint, one action per call."""
 
-    def __init__(self, session, url, model=DEFAULT_MODEL, max_retries=2):
+    def __init__(self, session, url, model=DEFAULT_MODEL, max_retries=2,
+                 temperature=DEFAULT_TEMPERATURE):
         self.session = session
         self.url = url
         self.model = model
         self.max_retries = max_retries
+        self.temperature = temperature
 
     def next_action(self, messages, tool_names) -> dict:
         """Ask for one action and return it validated.
@@ -158,7 +195,7 @@ class Planner:
             "model": self.model,
             "stream": False,
             "format": schema,
-            "options": {"temperature": 0},
+            "options": {"temperature": self.temperature},
             "messages": messages,
         }
         try:
