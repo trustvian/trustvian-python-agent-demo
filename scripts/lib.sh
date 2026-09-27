@@ -88,6 +88,18 @@ demo_init() {
     mkdir -p "$RUNTIME_DIR"
     cd "$DEMO_ROOT"
 
+    # `trustvian dev` supervises two helpers that are not part of the released
+    # `trustvian` binary, and resolves them flag -> environment -> beside the
+    # executable -> PATH. This repository builds all three into .demo/bin, which
+    # is none of those places, so it names them explicitly.
+    #
+    # Exported rather than passed as flags on each invocation: every `trustvian
+    # dev` in this repository needs both, and one export is one place to be
+    # wrong. bootstrap.sh builds them exactly as the Trustvian checkout's own
+    # `make dev-binaries` does.
+    export TRUSTVIAN_LOCAL_BIN="$BIN_DIR/trustvian-local"
+    export TRUSTVIAN_COLLECTOR_BIN="$BIN_DIR/trustvian-collector"
+
     trap cleanup EXIT INT TERM
 }
 
@@ -342,11 +354,12 @@ start_runtime() {
     RUNTIME_PID=$!
 
     # Tracked, and so reaped by the EXIT trap, unless the caller asked for a
-    # runtime that outlives this process. `tv-dev.sh runtime up` does: many
-    # evaluation runs share one control plane, and each of them is a separate
-    # invocation of this script. A detached runtime is stopped by
-    # `tv-dev.sh runtime down`, which finds it through the pid file below and
-    # verifies it is serving *this* directory's state before signalling it.
+    # runtime that outlives this process. `scripts/runtime.sh up` does: many
+    # evaluation runs share one control plane, and each is a separate
+    # `trustvian dev` invocation attaching with --api-url. A detached runtime is
+    # stopped by `scripts/runtime.sh down`, which finds it through the pid file
+    # below and verifies it is serving *this* directory's state before
+    # signalling it.
     if [ "${RUNTIME_DETACH:-no}" = "yes" ]; then
         printf '%s\n' "$RUNTIME_PID" >"$RUNTIME_DIR/trustvian-local.pid"
     else
@@ -490,11 +503,33 @@ supports_environments() {
     "$BIN_DIR/trustvian" --help 2>&1 | grep -q 'trustvian env'
 }
 
-# trustvian_dev_available reports whether the built CLI ships task 077's
-# unified local dev runtime, which scripts/tv-dev.sh exists only to stand in
-# for.
-trustvian_dev_available() {
-    "$BIN_DIR/trustvian" --help 2>&1 | grep -q 'trustvian dev'
+# require_trustvian_dev fails unless the built CLI ships `trustvian dev`.
+#
+# This used to be `trustvian_dev_available`, an optional capability that
+# a stand-in in this repository used to cover. Task 077 has shipped, the
+# stand-in is deleted,
+# and there is no fallback path: a build without `dev` is an old build, and
+# saying so is more useful than silently orchestrating the run some other way.
+#
+# Still asked of the binary rather than of a branch name or a version string,
+# for the same reason every other probe here is: a command either appears in
+# --help or it does not.
+require_trustvian_dev() {
+    if "$BIN_DIR/trustvian" --help 2>&1 | grep -q 'trustvian dev'; then
+        return 0
+    fi
+    fail "the Trustvian binary in $BIN_DIR does not offer 'trustvian dev'.
+
+       That command is task 077 and has been on Trustvian's main branch since
+       2026-09-27. This repository runs every workload through it and no longer
+       carries the stand-in it used before, so an older build cannot work.
+
+       Update the sibling Trustvian checkout to main and rebuild:
+
+           make bootstrap
+
+       bootstrap.sh names the checkout it builds from, and fails by name if it
+       cannot find one."
 }
 
 # scenario_runner_available reports whether the built CLI ships task 078's
@@ -515,6 +550,89 @@ tool_fidelity_in() {
            | index("tool") != null' "$1" >/dev/null 2>&1
 }
 
+# --- one evaluation run, through `trustvian dev` -----------------------
+
+# DEV_STATE_PATH_FILE records where `trustvian dev` said it keeps its state.
+#
+# Recorded rather than derived. dev keys its state directory by a hash of the
+# absolute workload path, and reimplementing that here would be a second
+# implementation of a path that is allowed to change — so `make clean` prints
+# what dev reported and this repository never computes it.
+DEV_STATE_PATH_FILE=".runtime/dev-state-path"
+
+# dev_run performs one evaluation run through `trustvian dev`.
+#
+# Everything the stand-in this repository used to carry composed is dev's now:
+# the Collector and
+# its configuration, the OTLP environment, the control-plane hierarchy, and the
+# run lifecycle including failing the run when the workload does. What is left
+# here is this demo's own arguments.
+#
+# Four of them are explicit on purpose.
+#
+# **--instrumentation existing.** The workload runs through
+# opentelemetry-instrument, which is one of the forms dev's `auto` accepts as
+# positive evidence — but a demo that relied on that inference would be
+# demonstrating dev's heuristic rather than its own setup. Stating the mode says
+# what is true: the command already carries its instrumentation, and dev
+# configures OTLP and injects nothing.
+#
+# **--candidate.** Both sides of this comparison are built from the same commit,
+# so dev's own derivation (git:<sha>, +dirty) would give them one candidate id —
+# and therefore one learning profile, because the candidate *is* the learning
+# scope. The two sides would then share a baseline and the second one to run
+# would be scored against what the first taught it.
+#
+# **--agent and --environment.** Both must agree with what the telemetry
+# declares or the run collects nothing: the processor derives the actor from
+# service.name, and the platform refuses a record whose environment differs from
+# its run's. dev exports both to the workload, which is what makes them agree.
+#
+# **--project.** dev would otherwise name the project after the git repository.
+# This demo's project id is documented, so it is stated.
+dev_run() {
+    local run_id="$1" candidate="$2" log="$3"; shift 3
+
+    # The zero-code agent is part of the command, not something dev attaches.
+    # dev's python-zero-code mode is reserved and refused in this build, and
+    # naming the interpreter and the wrapper explicitly is what decides which
+    # OpenTelemetry runtime gets loaded — inheriting whatever is first on PATH
+    # is how a workload silently stops being instrumented.
+    set +e
+    (
+        export PYTHONPATH="${PYTHONPATH:-$DEMO_ROOT}"
+        exec "$BIN_DIR/trustvian" dev \
+            --api-url "$API_URL" \
+            --project "$PROJECT_ID" \
+            --agent "$AGENT_ID" \
+            --environment "$ENVIRONMENT" \
+            --candidate "$candidate" \
+            --run-id "$run_id" \
+            --instrumentation existing \
+            -- "$VENV_DIR/bin/opentelemetry-instrument" "$@"
+    ) 2>&1 | agent_output "$log"
+    local status=${PIPESTATUS[0]}
+    set -e
+
+    # dev prints its state directory on every start. Captured here so `make
+    # clean` can name it without this repository deriving it.
+    local reported
+    reported="$(sed -n 's/^  State  *//p' "$log" | head -1)"
+    if [ -n "$reported" ]; then
+        printf '%s\n' "$reported" >"$DEMO_ROOT/$DEV_STATE_PATH_FILE"
+    fi
+
+    if [ "$status" -ne 0 ]; then
+        # dev has already failed the run rather than completing it, so nothing
+        # downstream can read it as evidence. Its exit status is the workload's
+        # own, which is why it is quoted rather than translated.
+        fail "the workload exited $status under trustvian dev; run $run_id was
+       failed, not completed:
+$(tail -30 "$log")"
+    fi
+    return 0
+}
+
 # --- reading a run's evidence back ------------------------------------
 
 # record_count reads the authoritative count from the control plane. Never
@@ -530,9 +648,10 @@ distinct_behaviors() {
 # agent_steps echoes the actions the agent chose, one per line, from the run
 # summary it wrote at the path given.
 #
-# Narration only. An unreadable summary is not fatal here, because tv-dev.sh
-# has already failed the run if the summary the evidence wait depended on was
-# missing.
+# Narration only, and not fatal when unreadable: the summary is the agent's own
+# report of what it chose, and the evidence the comparison rests on comes from
+# the control plane rather than from this file. A workload that did not finish
+# has already failed its run under dev.
 agent_steps() {
     [ -r "$1" ] || return 0
     jq -r '.steps[]?' "$1" 2>/dev/null || true

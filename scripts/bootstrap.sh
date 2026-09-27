@@ -116,14 +116,22 @@ else
     mkdir -p "$BIN_DIR"
     rm -f "$STAMP_FILE"
 
-    # GOWORK=off on the nested modules for the same reason Trustvian's own CI
-    # uses it: a workspace resolves dependencies the module does not declare.
+    # The two helpers are built exactly as the Trustvian checkout's own
+    # `make dev-binaries` builds them — from the nested module, with GOWORK=off.
+    # That target exists because `trustvian dev` supervises both and neither is
+    # part of the released `trustvian` binary, so what runs here has to be what a
+    # developer following Trustvian's own documentation gets.
+    #
+    # GOWORK=off is not incidental: a workspace resolves dependencies the module
+    # does not declare, which is the same reason Trustvian's CI and its
+    # end-to-end test both set it. Building through the workspace could succeed
+    # here and fail for anyone building the module on its own.
     ( cd "$TRUSTVIAN_DIR" && go build -o "$BIN_DIR/trustvian" ./cmd/trustvian )
     log "trustvian"
     ( cd "$TRUSTVIAN_DIR/platform" && GOWORK=off go build -o "$BIN_DIR/trustvian-local" ./cmd/trustvian-local )
-    log "trustvian-local"
+    log "trustvian-local          (dev's control plane)"
     ( cd "$TRUSTVIAN_DIR/processor" && GOWORK=off go build -o "$BIN_DIR/trustvian-collector" ./cmd/trustvian-collector )
-    log "trustvian-collector"
+    log "trustvian-collector      (dev's OTLP receiver)"
 
     # Written last, so an interrupted build never leaves a stamp claiming
     # binaries that are not there.

@@ -35,5 +35,4 @@ bootstrap: ## Build Trustvian binaries and create the demo Python environment
 	@./scripts/bootstrap.sh
 
 clean: ## Remove every generated artifact, including the evaluation database
-	@rm -rf .demo .runtime .trustvian
-	@echo "Removed .demo/, .runtime/ and .trustvian/"
+	@./scripts/clean.sh

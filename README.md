@@ -133,25 +133,63 @@ hiding it.
 
 ## One command, around your own agent
 
-`scripts/tv-dev.sh` is the single wrapper everything here goes through. It
-composes the runtime, the control-plane hierarchy, the Collector and the
-OpenTelemetry environment around a command it does not modify:
+Every workload here runs through **`trustvian dev`** — Trustvian
+[task 077](../trustvian/docs/tasks/v1.0/077-unified-otlp-local-dev-runtime.md),
+which shipped on 2026-09-27. It composes the control plane, the OTLP receiver,
+the control-plane hierarchy, the OpenTelemetry environment and the run lifecycle
+around a command it does not modify:
 
 ```bash
-scripts/tv-dev.sh --run-id my-run --candidate v2 --expect-records 10 \
-    -- .demo/venv/bin/python my_agent.py
+trustvian dev --candidate v2 -- opentelemetry-instrument python my_agent.py
 ```
 
-The interpreter is named explicitly because which Python runs decides which
-OpenTelemetry runtime gets attached. If your application already sets up
-OpenTelemetry itself, pass `--instrumentation existing` and Trustvian will
-configure OTLP and inject nothing — a second instrumentation stack would
-observe every action twice, and duplicate spans are a behavioral lie.
+This repository used to carry a 498-line stand-in for it, `scripts/tv-dev.sh`.
+That file is **deleted**. There is no fallback path and no compatibility shim: a
+Trustvian build without `dev` is an old build, and `make demo` and `make smoke`
+say so and stop rather than orchestrating the run some other way.
 
-It is a stand-in for Trustvian
-[task 077](../trustvian/docs/tasks/v1.0/077-unified-otlp-local-dev-runtime.md)'s
-`trustvian dev`, shaped like it deliberately, and it says so on every run once
-the real command ships. `scripts/tv-dev.sh --help` lists the options.
+What this repository still supplies is its own arguments, and each one is
+explicit for a reason:
+
+| Flag | Why it is stated rather than derived |
+|---|---|
+| `--instrumentation existing` | The command runs through `opentelemetry-instrument`, which dev's `auto` accepts as positive evidence — but a demo should demonstrate its own setup, not dev's inference. `existing` says what is true: the command carries its instrumentation and dev injects nothing. |
+| `--candidate reference` / `candidate` | Both sides are built from **one commit**, so dev's own derivation (`git:<sha>`) would give them one candidate id. The candidate *is* the learning scope, so they would share a baseline and whichever ran second would be scored against what the first taught it. |
+| `--agent support-agent` | The processor derives the actor from the arriving `service.name`. dev exports the agent it provisioned, which is what makes the two agree. |
+| `--environment local` | The platform refuses a record whose environment differs from its run's. Without agreement a run collects zero usable evidence while every process reports success. |
+| `--api-url` | Attaches to a control plane this repository started, instead of letting dev start and stop one per run. The two runs must land in **one database** to be comparable, and the browser has to outlive the run it is looking at. |
+
+`opentelemetry-instrument` is named in the command rather than attached by dev.
+dev's `python-zero-code` mode is reserved and refused in this build — it waits on
+an interpreter compatibility check — so the workload brings its own zero-code
+launcher, and naming the interpreter explicitly is what decides which
+OpenTelemetry runtime gets loaded.
+
+### What dev needs on disk
+
+`dev` supervises two executables that are not part of the released `trustvian`
+binary, and resolves them flag → environment → beside the executable → `PATH`.
+This repository builds all three into `.demo/bin`, which is none of those, so
+`scripts/lib.sh` exports the two paths once:
+
+```text
+TRUSTVIAN_LOCAL_BIN        .demo/bin/trustvian-local      dev's control plane
+TRUSTVIAN_COLLECTOR_BIN    .demo/bin/trustvian-collector  dev's OTLP receiver
+```
+
+`scripts/bootstrap.sh` builds both exactly as the Trustvian checkout's own
+`make dev-binaries` does — from the nested module, with `GOWORK=off`, because a
+workspace resolves dependencies the module does not declare.
+
+### The control plane is started separately
+
+`scripts/runtime.sh up|url|down` starts a control plane that outlives the runs
+attaching to it. That is **not** a stand-in for anything: dev starts one of its
+own when no `--api-url` is given and stops it on the way out, which is right for
+one run and wrong for several. Trustvian's own
+[docs/local-development.md](../trustvian/docs/local-development.md) § *Running
+the parts separately* describes exactly this shape, and it is also task 078's CI
+path.
 
 ## Scenarios
 
@@ -221,10 +259,24 @@ publishes.
 
 No Docker. No API keys. No `sudo`. No external service but Ollama.
 
-Everything generated lives under three gitignored directories in this
-repository (`.demo/`, `.runtime/`, `.trustvian/`); no state is written into
-other projects. The Go and Python toolchains write to their usual user-level
-caches, which is what `go build` and `pip install` do.
+Three gitignored directories in this repository hold what it generates —
+`.demo/` (binaries and virtualenvs), `.runtime/` (logs and per-run scratch) and
+`.trustvian/` (the control-plane database `scripts/runtime.sh` starts).
+
+**`trustvian dev` keeps its own state outside this repository**, under
+`~/.trustvian/dev/<hash of this directory>/`: the generated Collector
+configuration, both helper logs, and the learned baseline for each candidate. dev
+prints that path on the `State` line of every start, and it is deliberate —
+dev's working directory is the application's repository, and task 077's
+acceptance criterion 2 is that the repository is byte-identical afterwards.
+
+`make clean` removes the three above and **names** dev's path without removing
+it. Deriving a hash-keyed path under `$HOME` a second time is how `rm -rf`
+reaches the wrong directory, so this repository prints what dev reported and
+stops there.
+
+The Go and Python toolchains write to their usual user-level caches, which is
+what `go build` and `pip install` do.
 
 ### Required layout
 
@@ -246,16 +298,25 @@ beside the binaries, and pip when the installed set matches a hash of
 `agent/requirements.txt` and the pinned OpenTelemetry versions. A dirty
 Trustvian worktree never matches, so uncommitted changes there always rebuild.
 
-Measured on an Apple M-series laptop, with a warm Go build cache and a warm
-pip cache:
+Measured 2026-09-27 on an Apple M-series laptop, with a warm Go build cache and
+a warm pip cache, against Trustvian `5362f51`:
 
 ```text
-everything already current    0.17 s      no network
-.demo/ removed entirely      15.0  s      three Go binaries, two virtualenvs
+bootstrap, everything already current    0.18 s     no network
+bootstrap, .demo/ removed entirely      14.6  s     three Go binaries, two venvs
+
+make smoke   (fixture, no model)        10.1 s      full lifecycle + 104 tests
+make demo    cold, to its result       149   s
+make demo    warm, to its result       155   s
 ```
 
-A cold `make demo` additionally performs six model-driven bounded loops —
-expect several minutes on the first run; it has not hung.
+**The demo's cost is the model, not the setup.** The warm run came out *slower*
+than the cold one, which is the honest way to say that bootstrap's 14 s sits well
+inside the variance of six model-driven bounded loops. Treat 2–3 minutes as the
+figure and the 14 s as noise.
+
+`make demo` is timed *to its result* rather than to its exit, because it holds
+the control plane open for the WebUI until Ctrl-C by design.
 
 ## Commands
 
@@ -274,12 +335,15 @@ make clean       # remove every generated artifact, including the database
 2. Starts a fresh local Trustvian control plane, backed by SQLite.
 3. Starts the mock backend services on `crm.localhost`, `knowledge.localhost`,
    `mail.localhost` and `export.localhost`.
-4. Creates the project, agent, environment and two candidates through the real
-   `trustvian` CLI. The hierarchy exists before any telemetry does.
-5. Prints the WebUI URL and **waits for ENTER**, so the browser is open before
+4. Prints the WebUI URL and **waits for ENTER**, so the browser is open before
    anything is produced.
-6. Runs the reference evaluation through `scripts/tv-dev.sh`.
-7. **Waits for ENTER again**, then runs the candidate the same way.
+5. Runs the reference evaluation through `trustvian dev`, which creates the
+   project, agent, environment and candidate on the way — each only where it is
+   missing. The hierarchy still exists before any telemetry does; it is now
+   created by dev at the first run rather than by this repository beforehand,
+   which is one thing retiring the stand-in gave up.
+6. **Waits for ENTER again**, then runs the candidate the same way.
+7. Both runs attach to the control plane from step 2 with `--api-url`.
 8. Calls `trustvian eval compare` and prints the diff and the gate result.
 9. Leaves the control plane running for inspection, until Ctrl-C.
 
@@ -299,8 +363,14 @@ The evidence is durable in SQLite, so both runs stay retrievable after the
 demo exits:
 
 ```bash
-.demo/bin/trustvian-local --state-dir .trustvian
+scripts/runtime.sh up      # or: .demo/bin/trustvian-local --state-dir .trustvian
 ```
+
+Clients in this directory then need no `--api-url`: `trustvian eval compare` and
+friends read `.trustvian/runtime.json`. dev publishes a second discovery location
+under its own state directory, which the CLI falls back to when this directory
+has none — useful when dev started the control plane itself, and only while it is
+still running, since a clean shutdown removes its own discovery file.
 
 The next `make demo` resets `.trustvian/`, so treat this as a way to revisit
 existing evidence rather than to accumulate it across runs.
@@ -325,8 +395,10 @@ count instead.
 make demo (model)            21 / 27 *                 4 / 5 *           1
 make smoke (fixture)         27 / 36                   3 / 4             1
 
-* Observed in a verified run, not a guarantee: the model decides how many
-  turns to take. The behavior set is stable at temperature 0.
+* Observed in verified runs on 2026-09-27, not a guarantee: the model decides
+  how many turns to take. The behavior set is stable at temperature 0. The
+  fixture's counts are asserted exactly by `make smoke`; the model's are
+  reported.
 ```
 
 ## Application dependency vs runtime instrumentation
@@ -350,7 +422,7 @@ the agent's interpreter for the benefit of a scenario runner would quietly
 falsify the claim above.
 
 This also needs `OTEL_SEMCONV_STABILITY_OPT_IN=http` at runtime, set by
-`scripts/tv-dev.sh` for every launch. Without it the `requests`
+`trustvian dev` for every launch. Without it the `requests`
 instrumentation emits the older `http.url`/`http.method` attributes, while
 Trustvian's processor reads `server.address` and `http.request.method` — so
 every span would arrive with an empty target and the observed behaviors would
@@ -366,12 +438,13 @@ branch name or a grep of the sibling checkout:
 |---|---|
 | Zero-input live view (074) | `GET /v1/projects` answers 200 |
 | Environment model (065) | `trustvian --help` offers `trustvian env` |
-| `trustvian dev` (077) | `trustvian --help` offers `trustvian dev` |
+| `trustvian dev` (077) | `trustvian --help` offers `trustvian dev` — **required**, not optional: there is no fallback, so a build without it fails here rather than later |
 | Scenario runner (078) | `trustvian eval --help` mentions a scenario |
 | Tool fidelity (075) | a comparison response describes a `tool` behavior |
 
-When a capability is missing, the output says so plainly. When one arrives,
-the stand-in for it says it should be retired.
+When a capability is missing, the output says so plainly. When one arrives, the
+stand-in for it says it should be retired — and when one becomes a hard
+requirement, as `trustvian dev` now is, the probe stops the run instead.
 
 ## Smoke test
 
@@ -406,9 +479,10 @@ agent/requirements.txt     its declared dependencies — requests, and nothing e
 fixtures/                  the deterministic, model-free agent CI runs
 mock_services/server.py    deterministic local backend services
 scenarios/                 scenario files, task 078's shape
-scripts/tv-dev.sh          the one wrapper, task 077's shape
-scripts/lib.sh             shared primitives and the capability probes
+scripts/lib.sh             shared primitives, dev_run, and the capability probes
 scripts/bootstrap.sh       builds Trustvian, creates the environments
+scripts/runtime.sh         the control plane many runs attach to
+scripts/clean.sh           make clean
 scripts/demo.sh            make demo
 scripts/smoke.sh           make smoke
 tools/tvdemo/              the scenario runner and this repository's tooling
@@ -423,11 +497,16 @@ docs/design/               what is being built, and why
 make clean
 ```
 
-Removes `.demo/`, `.runtime/` and `.trustvian/`. A previous `make demo` left
-running does not block a new one: the new run stops that runtime and starts
-its own, reporting both steps. It only ever stops a runtime serving this
-directory's `.trustvian/`, so a `trustvian-local` you started yourself is
-never touched.
+Removes `.demo/`, `.runtime/` and `.trustvian/`, then prints the path
+`trustvian dev` last reported for its own state — which it does **not** remove,
+because this repository did not derive that path and will not delete one it was
+only told about.
+
+A previous `make demo` left running does not block a new one: the new run stops
+that runtime and starts its own, reporting both steps. It only ever stops a
+runtime serving this directory's `.trustvian/`, so a `trustvian-local` you
+started yourself is never touched — and neither is one `trustvian dev` started,
+which keeps its state elsewhere.
 
 ## License
 

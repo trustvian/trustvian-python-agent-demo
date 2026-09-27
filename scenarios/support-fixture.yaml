@@ -15,17 +15,37 @@ description: >-
 # where one execution is one sample of a distribution.
 runs: 1
 
-# `python` resolves to the demo-managed interpreter, not to whatever is first
-# on PATH: which Python runs decides which OpenTelemetry runtime is attached.
-command: [python, fixtures/deterministic_agent.py]
+# The command carries its own instrumentation. `opentelemetry-instrument` is the
+# zero-code launcher from the demo-managed virtualenv and `python` is the
+# interpreter beside it — both resolved to that virtualenv rather than to
+# whatever is first on PATH, because which Python runs decides which
+# OpenTelemetry runtime gets attached.
+#
+# Naming the launcher here rather than having the runner prepend it is what makes
+# `instrumentation: existing` below a true statement: trustvian dev configures
+# OTLP and injects nothing, and this line says where the instrumentation comes
+# from.
+command: [opentelemetry-instrument, python, fixtures/deterministic_agent.py]
+
+# trustvian dev's own mode. The workload above already sends OpenTelemetry, so
+# dev configures the exporter and attaches nothing. dev's `auto` would accept
+# opentelemetry-instrument in argv[0] as positive evidence and reach the same
+# answer — stated explicitly because a demo should not depend on an inference.
+instrumentation: existing
 
 # The local world this workload talks to.
 services: [mocks]
 
 # The fixture's activity is fixed, so each side states how much evidence to
-# expect. That is the stronger check: it would catch a workload that silently
-# did less. A model-driven scenario uses `evidence: summary` instead, because
-# how many turns a model takes is not knowable in advance.
+# expect — and that is now an assertion checked after the run rather than a wait
+# before it. trustvian dev stops the Collector before moving the run to a
+# terminal state, which flushes what it holds, so everything the workload emitted
+# has landed by the time dev exits. Requiring the count to be exactly N is
+# stronger than the lower-bound wait this repository used before: it also catches
+# a workload that did more.
+#
+# A model-driven scenario uses `evidence: summary` instead, because how many
+# turns a model takes is not knowable in advance.
 evidence: records
 
 reference:

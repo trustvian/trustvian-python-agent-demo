@@ -114,6 +114,10 @@ echo "Lifecycle"
 "$DEMO_ROOT/scripts/bootstrap.sh" >/dev/null
 log "bootstrap"
 
+# Asserted rather than probed: this repository runs every workload through
+# `trustvian dev` and keeps no fallback, so a build without it cannot be smoked.
+check "the built CLI offers trustvian dev" require_trustvian_dev
+
 # The tests need the demo venv for `requests`, so they run after bootstrap —
 # but before anything is started, because a logic error in the agent should
 # cost seconds rather than a whole lifecycle.
@@ -147,35 +151,29 @@ log "mock services on $MOCK_PORT"
 REFERENCE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * REFERENCE_ACTIONS ))
 CANDIDATE_EXPECTED=$(( ROUNDS * TICKETS_PER_ROUND * CANDIDATE_ACTIONS ))
 
-# Both runs go through the same wrapper `make demo` uses, with the same
-# options. A smoke test that drove a private code path would be asserting
-# something nobody runs.
+# Both runs go through `trustvian dev`, exactly as `make demo` does. A smoke
+# test that drove a private code path would be asserting something nobody runs.
 #
-# The fixture's activity is fixed, so the expected count is stated
-# arithmetically rather than read back from the workload's own report: that is
-# the stronger check here, because it would catch a fixture that silently did
-# less. The model-driven agent gets --expect-records-from instead, since its
-# activity is not knowable in advance.
+# The fixture's activity is fixed, so the expected counts are stated
+# arithmetically — and they are now *assertions* rather than a wait. The wrapper
+# this repository used to carry blocked until the run held at least N records;
+# dev instead stops the Collector before the run goes terminal, which flushes
+# what it holds, so everything the workload emitted has landed by the time dev
+# exits. Reading the count back afterwards and requiring it to be exactly N is
+# the stronger check: a lower-bound wait could not catch a fixture that did more.
 smoke_run() {
-    local run_id="$1" candidate="$2" profile="$3" mode="$4" expected="$5"
+    local run_id="$1" candidate="$2" mode="$3"
     SUPPORT_AGENT_PORT="$MOCK_PORT" \
     SUPPORT_AGENT_MODE="$mode" \
     SUPPORT_AGENT_ROUNDS="$ROUNDS" \
-        "$DEMO_ROOT/scripts/tv-dev.sh" \
-            --api-url "$API_URL" \
-            --run-id "$run_id" \
-            --candidate "$candidate" \
-            --behavioral-profile "$profile" \
-            --expect-records "$expected" \
-            -- "$VENV_DIR/bin/python" "$DEMO_ROOT/fixtures/deterministic_agent.py"
+        dev_run "$run_id" "$candidate" "$RUNTIME_DIR/dev-$mode.log" \
+            "$VENV_DIR/bin/python" "$DEMO_ROOT/fixtures/deterministic_agent.py"
 }
 
-smoke_run "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "$REFERENCE_PROFILE" \
-          "reference" "$REFERENCE_EXPECTED"
+smoke_run "$REFERENCE_RUN" "$REFERENCE_CANDIDATE" "reference"
 log "reference run complete"
 
-smoke_run "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "$CANDIDATE_PROFILE" \
-          "candidate" "$CANDIDATE_EXPECTED"
+smoke_run "$CANDIDATE_RUN" "$CANDIDATE_CANDIDATE" "candidate"
 log "candidate run complete"
 
 compare_runs

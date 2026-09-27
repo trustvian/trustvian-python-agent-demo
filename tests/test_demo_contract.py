@@ -11,9 +11,9 @@ asserted here, where CI sees them.
 No test in this file runs a model, a server or a shell script.
 """
 
-import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
 DEMO = ROOT / "scripts" / "demo.sh"
 SMOKE = ROOT / "scripts" / "smoke.sh"
-TVDEV = ROOT / "scripts" / "tv-dev.sh"
+RUNTIME = ROOT / "scripts" / "runtime.sh"
+CLEAN = ROOT / "scripts" / "clean.sh"
 
 
 def body_of(path: Path) -> str:
@@ -132,63 +133,131 @@ class ApplicationDependencyTest(unittest.TestCase):
             self.assertNotIn(forbidden, declared)
 
 
-class WrapperContractTest(unittest.TestCase):
-    """Both entry points go through one wrapper, shaped like task 077."""
+class DevAdoptionTest(unittest.TestCase):
+    """Every workload runs through `trustvian dev`, and nothing stands in."""
 
-    def test_the_wrapper_exists_and_is_executable(self):
-        self.assertTrue(TVDEV.exists(), "scripts/tv-dev.sh is missing")
-        self.assertTrue(os.access(TVDEV, os.X_OK), "scripts/tv-dev.sh is not executable")
+    def test_the_stand_in_is_gone(self):
+        # Task 077 shipped. A fallback path would mean two orchestrations, and
+        # the one a user trusts is whichever they happened to run.
+        self.assertFalse(
+            (ROOT / "scripts" / "tv-dev.sh").exists(),
+            "scripts/tv-dev.sh is back; trustvian dev has shipped and there is "
+            "no fallback path")
 
-    def test_the_wrapper_is_valid_under_bash_3_2(self):
-        # /bin/bash on macOS is 3.2.57, and CI runs a modern bash; a construct
-        # only one accepts would break exactly one of them.
-        for shell in ("/bin/bash", "bash"):
-            with self.subTest(shell=shell):
-                proc = subprocess.run([shell, "-n", str(TVDEV)],
-                                      capture_output=True, text=True)
-                self.assertEqual(proc.returncode, 0, proc.stderr)
+    def test_no_script_mentions_the_stand_in(self):
+        for script in (LIB, DEMO, SMOKE, RUNTIME, CLEAN):
+            with self.subTest(script=script.name):
+                self.assertNotIn("tv-dev", script.read_text())
 
-    def test_both_entry_points_use_it(self):
+    def test_both_entry_points_run_workloads_through_dev(self):
         # A smoke test that drove a private code path would be asserting
         # something nobody runs.
         for script in (DEMO, SMOKE):
             with self.subTest(script=script.name):
-                self.assertIn("tv-dev.sh", body_of(script))
+                self.assertIn("dev_run ", body_of(script))
 
-    def test_the_wrapper_takes_its_workload_after_a_double_dash(self):
-        # The property that lets a developer point this at their own agent,
-        # which is the whole reason the wrapper exists.
-        body = body_of(TVDEV)
-        self.assertIn('CHILD=("$@")', body)
+    def test_dev_run_invokes_the_real_command(self):
+        body = function_body(LIB, "dev_run")
+        self.assertIn('"$BIN_DIR/trustvian" dev', body)
+        self.assertIn('-- "$VENV_DIR/bin/opentelemetry-instrument"', body)
 
-    def test_the_wrapper_never_pauses(self):
-        # It is called from CI, from the stability sweep and from the bench.
-        body = body_of(TVDEV)
-        self.assertNotIn("pause ", body)
-        for form in ("read -r", "read -p"):
-            self.assertNotIn(form, body, f"tv-dev.sh must not block on {form!r}")
+    def test_dev_run_states_the_instrumentation_mode(self):
+        # The workload runs through opentelemetry-instrument, which dev's `auto`
+        # would accept as positive evidence. A demo should not depend on that
+        # inference, so the mode is named.
+        self.assertIn("--instrumentation existing", function_body(LIB, "dev_run"))
+
+    def test_dev_run_names_every_identity_value(self):
+        # Both sides of the comparison come from one commit, so dev's own
+        # derivation would give them one candidate id — and therefore one
+        # learning profile, because the candidate is the learning scope.
+        body = function_body(LIB, "dev_run")
+        for flag in ("--project", "--agent", "--environment", "--candidate",
+                     "--run-id"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, body)
+
+    def test_the_helper_binaries_are_exported_once(self):
+        # dev resolves them flag -> environment -> beside the executable ->
+        # PATH, and this repository builds them somewhere that is none of those.
+        body = function_body(LIB, "demo_init")
+        self.assertIn("export TRUSTVIAN_LOCAL_BIN=", body)
+        self.assertIn("export TRUSTVIAN_COLLECTOR_BIN=", body)
+
+    def test_a_build_without_dev_is_refused_rather_than_worked_around(self):
+        body = function_body(LIB, "require_trustvian_dev")
+        self.assertIn("--help", body)
+        self.assertIn("$BIN_DIR/trustvian", body)
+        self.assertIn("fail ", body)
+        for script in (DEMO, SMOKE):
+            with self.subTest(script=script.name):
+                self.assertIn("require_trustvian_dev", body_of(script))
 
     def test_a_failed_workload_fails_its_run_instead_of_completing_it(self):
-        # A workload that crashed produced no verdict, not a passing one. The
-        # exit-3-versus-1 distinction the CI gate depends on starts here.
-        body = body_of(TVDEV)
-        self.assertIn("eval fail", body)
-        self.assertIn("CHILD_STATUS", body)
+        # dev does this, and dev_run must not paper over it: a workload that
+        # crashed produced no verdict, not a passing one. The exit-3-versus-1
+        # distinction the CI gate depends on starts here.
+        body = function_body(LIB, "dev_run")
+        self.assertIn("failed, not completed", body)
 
-    def test_the_otel_environment_is_composed_in_exactly_one_place(self):
-        # The application never sets these and never sees them in its
-        # manifest; exactly one file supplies them, at launch.
-        marker = "OTEL_EXPORTER_OTLP_ENDPOINT"
-        self.assertIn(marker, TVDEV.read_text())
-        for other in (LIB, DEMO, SMOKE):
-            with self.subTest(script=other.name):
-                self.assertNotIn(marker, other.read_text())
+    def test_no_script_composes_the_otel_environment_any_more(self):
+        # dev owns it now. A script that also set these would be configuring
+        # the thing it delegated, and the two could disagree.
+        for script in (LIB, DEMO, SMOKE, RUNTIME, CLEAN):
+            with self.subTest(script=script.name):
+                self.assertNotIn("OTEL_EXPORTER_OTLP_ENDPOINT",
+                                 script.read_text())
 
-    def test_the_stable_semconv_opt_in_is_set(self):
-        # Without it the instrumentation emits legacy http.url/http.method,
-        # Trustvian's processor reads server.address, and every span arrives
-        # with an empty target — collapsing the observed behaviors.
-        self.assertIn("OTEL_SEMCONV_STABILITY_OPT_IN", TVDEV.read_text())
+    def test_the_scripts_are_valid_under_bash_3_2(self):
+        # /bin/bash on macOS is 3.2.57, and CI runs a modern bash; a construct
+        # only one accepts would break exactly one of them.
+        for script in (LIB, DEMO, SMOKE, RUNTIME, CLEAN):
+            for shell in ("/bin/bash", "bash"):
+                with self.subTest(script=script.name, shell=shell):
+                    proc = subprocess.run([shell, "-n", str(script)],
+                                          capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_clean_reports_the_dev_state_path_and_does_not_remove_it(self):
+        """Run it, in a throwaway tree, and check the directory survives.
+
+        Asserted by behavior rather than by reading the script, because the
+        property is "this path is still there afterwards" and a grep for `rm -rf`
+        cannot distinguish the command from the suggestion clean.sh prints.
+
+        dev keys its state by a hash of the workload directory. Re-deriving that
+        path here would be the second implementation whose failure mode is
+        `rm -rf` on the wrong directory, so clean.sh only ever prints what dev
+        reported — and this test is what holds that.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "repo"
+            (tree / "scripts").mkdir(parents=True)
+            (tree / "scripts" / "clean.sh").write_bytes(CLEAN.read_bytes())
+            (tree / "scripts" / "clean.sh").chmod(0o755)
+            for generated in (".demo", ".runtime", ".trustvian"):
+                (tree / generated).mkdir()
+
+            # Stand in for what a dev run would have recorded.
+            dev_state = Path(tmp) / "pretend-dev-state"
+            dev_state.mkdir()
+            (dev_state / "baseline-reference.json").write_text("{}")
+            (tree / ".runtime" / "dev-state-path").write_text(f"{dev_state}\n")
+
+            proc = subprocess.run([str(tree / "scripts" / "clean.sh")],
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+            for generated in (".demo", ".runtime", ".trustvian"):
+                with self.subTest(removed=generated):
+                    self.assertFalse((tree / generated).exists(),
+                                     f"{generated} should have been removed")
+
+            self.assertTrue(dev_state.exists(),
+                            "clean.sh removed trustvian dev's state directory, "
+                            "which this repository did not derive")
+            self.assertIn(str(dev_state), proc.stdout,
+                          "clean.sh did not name the path dev reported")
 
 
 class CapabilityProbeTest(unittest.TestCase):
@@ -202,7 +271,7 @@ class CapabilityProbeTest(unittest.TestCase):
         self.assertIn("curl", body)
 
     def test_the_cli_capabilities_are_probed_by_asking_the_binary(self):
-        for name in ("supports_environments", "trustvian_dev_available",
+        for name in ("supports_environments", "require_trustvian_dev",
                      "scenario_runner_available"):
             with self.subTest(probe=name):
                 body = function_body(LIB, name)
@@ -222,17 +291,6 @@ class CapabilityProbeTest(unittest.TestCase):
         # being true the moment the file moves.
         lib = LIB.read_text()
         self.assertNotIn("TRUSTVIAN_DIR", lib)
-
-
-class WrapperStandInTest(unittest.TestCase):
-    """The wrapper is a stand-in, and says so where someone will see it."""
-
-    def test_it_names_the_task_it_stands_in_for(self):
-        self.assertIn("077", TVDEV.read_text())
-
-    def test_it_reports_when_the_real_command_has_shipped(self):
-        body = body_of(TVDEV)
-        self.assertIn("trustvian_dev_available", body)
 
 
 if __name__ == "__main__":
