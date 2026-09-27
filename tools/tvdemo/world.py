@@ -15,7 +15,14 @@ import time
 import urllib.error
 import urllib.request
 
-OLLAMA_API = "http://127.0.0.1:11434"
+# The address **the agent itself calls**, from agent/planner.py's own constants.
+#
+# Not imported from there: that module is the application under test and pulls in
+# `requests`, which this repository's tooling virtualenv deliberately does not
+# have. tests/test_demo_contract.py asserts the two agree, the same way the model
+# name is already pinned.
+AGENT_OLLAMA_HOST = "ollama.localhost"
+AGENT_OLLAMA_PORT = 11434
 
 
 class WorldError(Exception):
@@ -26,6 +33,17 @@ def _free_port() -> int:
     with contextlib.closing(socket.socket()) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _port_is_listening(host, port, timeout=2):
+    """Whether anything accepts a connection there.
+
+    Weaker than an HTTP probe on purpose: its only job is to tell an absent
+    server apart from a silent one.
+    """
+    with contextlib.closing(socket.socket()) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
 
 
 def _get(url, timeout=2):
@@ -117,30 +135,75 @@ class Runtime:
         return False
 
 
-def require_ollama(model):
-    """Check a local Ollama is serving the model, without starting one.
+def require_ollama(model, timeout=180):
+    """Require that the model answers, on the address the agent will use.
 
     Deliberately does not start a server. `make demo` does that through
-    scripts/lib.sh, which is careful to stop only a server it started itself —
-    a developer's own Ollama, serving other work, must survive this
-    repository. Duplicating that care here to save one command would be the
-    wrong trade.
+    scripts/lib.sh, which is careful to stop only a server it started itself — a
+    developer's own Ollama, serving other work, must survive this repository.
+    Duplicating that care here to save one command would be the wrong trade.
+
+    What it does check is stronger than what it used to. The old version asked
+    ``GET /api/version`` on 127.0.0.1 and then listed models. Both pass in
+    situations where the agent cannot work:
+
+    * **127.0.0.1 is not the address the agent calls.** ``agent/planner.py`` calls
+      ``ollama.localhost``, which on macOS resolves to ``::1`` first while Ollama
+      binds IPv4 only. Today the client retries the next address; where ``::1`` is
+      filtered rather than refused, every model call hangs while a 127.0.0.1 probe
+      stays green.
+    * **A stopped server passes a connect check.** Measured: a suspended
+      ``ollama serve`` keeps its listening socket, so the kernel completes the
+      handshake and nothing ever answers.
+    * **``/api/tags`` reads metadata from disk.** A model whose weights are corrupt
+      or too large for available memory is listed, then fails on first use.
+
+    So this makes one real generation through the agent's own URL. Nothing of the
+    reply is returned or logged: it is a model completion, and invariant 7 of the
+    design doc admits no exemption for a readiness probe.
     """
-    try:
-        _get(f"{OLLAMA_API}/api/version")
-    except (urllib.error.URLError, OSError):
-        raise WorldError(
-            f"this scenario needs a local Ollama at {OLLAMA_API}, and nothing "
-            f"is answering there.\n"
-            f"       Start one with `ollama serve`, then re-run.") from None
+    url = f"http://{AGENT_OLLAMA_HOST}:{AGENT_OLLAMA_PORT}"
 
+    # Distinguish "nothing is there" from "something is there and silent". They
+    # are different problems with different fixes, and reporting the second as the
+    # first sends a developer looking for a port conflict they do not have.
+    if not _port_is_listening(AGENT_OLLAMA_HOST, AGENT_OLLAMA_PORT):
+        raise WorldError(
+            f"this scenario needs a local Ollama reachable at {url}, and nothing "
+            f"is listening there.\n"
+            f"       Start one with `ollama serve`, then re-run.")
+
+    payload = json.dumps({
+        "model": model,
+        "stream": False,
+        "messages": [{"role": "user", "content": "Reply with: ok"}],
+        # The content is irrelevant; that a generation completes is the point.
+        "options": {"temperature": 0, "num_predict": 4},
+    }).encode()
+
+    request = urllib.request.Request(
+        f"{url}/api/chat", data=payload,
+        headers={"content-type": "application/json"})
     try:
-        tags = json.loads(_get(f"{OLLAMA_API}/api/tags", timeout=10))
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            answer = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        # Ollama's own error envelope is far more useful than the status code.
+        detail = exc.read()[:400].decode("utf-8", "replace")
+        raise WorldError(
+            f"{url} refused to generate with model {model!r}: {detail}") from None
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise WorldError(f"could not list the models Ollama has: {exc}") from None
-
-    installed = {entry.get("name", "") for entry in tags.get("models", [])}
-    if model not in installed:
         raise WorldError(
-            f"this scenario needs the model {model!r}, which Ollama does not "
-            f"have.\n       Install it with: ollama pull {model}")
+            f"the model did not answer at {url} within {timeout}s: {exc}\n"
+            f"       That address is the one agent/planner.py calls, checked here "
+            f"rather than 127.0.0.1 on purpose.\n"
+            f"       A suspended server produces exactly this — check:\n"
+            f"           ps -o pid,stat,command= -p $(pgrep -f 'ollama serve')\n"
+            f"       A STAT of 'T' means stopped: it accepts connections and "
+            f"never answers.") from None
+
+    if not (answer.get("message") or {}).get("content"):
+        raise WorldError(
+            f"{url} answered for model {model!r}, but with no usable reply. The "
+            f"agent's first turn would fail the same way. Ollama said: "
+            f"{json.dumps(answer)[:400]}")
