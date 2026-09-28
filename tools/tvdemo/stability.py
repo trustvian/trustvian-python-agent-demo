@@ -284,6 +284,76 @@ class Sweep:
                                      r["operation_name"]))
 
 
+def false_fail_rate_by_threshold(per_run, group_size, thresholds, j=0):
+    """What a k-of-N gate would have reported, for each candidate k.
+
+    Task 078 needs the false-FAIL rate at N >= 5 per candidate k, and a
+    single-pair sweep cannot give it: a k-of-N rule counts presence across a
+    *group* of runs per side, so it has to be evaluated over groups.
+
+    Every run here is the same unchanged agent, so any behavior the rule calls
+    repeatedly added is a false FAIL by construction. That is what makes this
+    measurable at all — there is no true positive to separate out.
+
+    The method: choose `group_size` runs as the reference side and `group_size`
+    disjoint runs as the candidate side, count in how many runs of each side a
+    behavior appears, and apply 078's rule —
+
+        repeatedly added  candidate_runs_present >= k  and
+                          reference_runs_present  <= j
+
+    — over every such split. With N = 10 and groups of 5 that is C(10,5) = 252
+    splits, each direction counted separately because the rule is asymmetric.
+
+    **Demo-side aggregation, and labelled as such wherever it is reported.** The
+    behavior sets came from the control plane; the grouping and the counting are
+    this repository's, because no route aggregates across runs yet. When task 078
+    ships GET /v1/evaluation-runs/{id}/behaviors and its repeated gate, this is
+    what the platform will compute instead.
+    """
+    sets = [{b["fingerprint_id"] for b in entry["behaviors"]} for entry in per_run]
+    n = len(sets)
+    if group_size * 2 > n:
+        raise ValueError(
+            f"a {group_size}+{group_size} split needs {group_size * 2} runs, "
+            f"and this sweep has {n}")
+
+    splits = []
+    for reference_index in itertools.combinations(range(n), group_size):
+        remaining = [i for i in range(n) if i not in reference_index]
+        for candidate_index in itertools.combinations(remaining, group_size):
+            splits.append((reference_index, candidate_index))
+
+    out = []
+    for k in thresholds:
+        failures = 0
+        for reference_index, candidate_index in splits:
+            if _repeatedly_added(sets, reference_index, candidate_index, k, j):
+                failures += 1
+        out.append({
+            "k": k,
+            "j": j,
+            "group_size": group_size,
+            "splits": len(splits),
+            "false_fails": failures,
+            "false_fail_rate": failures / len(splits) if splits else None,
+        })
+    return out
+
+
+def _repeatedly_added(sets, reference_index, candidate_index, k, j) -> bool:
+    """Whether any behavior satisfies 078's repeatedly-added rule on one split."""
+    behaviors = set()
+    for i in (*reference_index, *candidate_index):
+        behaviors |= sets[i]
+    for fingerprint in behaviors:
+        reference_present = sum(1 for i in reference_index if fingerprint in sets[i])
+        candidate_present = sum(1 for i in candidate_index if fingerprint in sets[i])
+        if candidate_present >= k and reference_present <= j:
+            return True
+    return False
+
+
 def zero_false_fail_threshold(presence, runs):
     """The smallest k for which no behavior would cross a k-of-N threshold.
 
