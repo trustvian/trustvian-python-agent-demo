@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import requests
 
+from unittest.mock import Mock
+
+from agent import planner as planner_mod
 from agent import planner
 
 
@@ -184,6 +187,13 @@ class NextActionTest(unittest.TestCase):
 
     # Review Focus 2. An HTTP error is not a malformed reply, and a
     # correction message cannot fix it.
+    #
+    # A 5xx is now re-sent — identically, up to MAX_GENERATION_ATTEMPTS —
+    # because Ollama returns one when the model aborts on a repetition loop, and
+    # another sample does fix that. What must not happen is the thing this test
+    # was written to prevent: treating it as a malformed reply and appending a
+    # correction, which would teach the model about a mistake it did not make
+    # and grow the conversation that caused the problem.
     def test_http_error_is_not_retried_as_malformed(self):
         stub = StubOllama([], status=500)
         self.addCleanup(stub.close)
@@ -191,7 +201,18 @@ class NextActionTest(unittest.TestCase):
             planner.Planner(self.session, stub.url).next_action(
                 [{"role": "user", "content": "go"}], REF_TOOLS)
         self.assertIn("Ollama", str(ctx.exception))
-        self.assertEqual(len(stub.requests), 1)
+
+        # Bounded, and bounded by the generation budget rather than by the
+        # malformed-reply budget — the two are separate on purpose.
+        self.assertEqual(len(stub.requests),
+                         planner.Planner.MAX_GENERATION_ATTEMPTS)
+
+        # Every attempt carried the same messages. This is the assertion that
+        # survives from the original: no correction was appended.
+        sent = [request["messages"] for request in stub.requests]
+        for messages in sent[1:]:
+            self.assertEqual(messages, sent[0],
+                             "a correction message was appended to a 5xx retry")
 
     # A 200 with an unusable body is a malformed reply, not a transport
     # failure — but it must still become a PlannerError, not a raw KeyError,
@@ -328,3 +349,109 @@ class TemperatureTest(unittest.TestCase):
         planner.Planner(self.session, stub.url).next_action(
             [{"role": "user", "content": "go"}], REF_TOOLS)
         self.assertEqual(stub.requests[-1]["options"]["temperature"], 0.0)
+
+
+class GenerationFailureTest(unittest.TestCase):
+    """A 5xx that says the model could not generate is retried; a dead server is not.
+
+    This distinction is load-bearing rather than tidy. Ollama aborts generation
+    with 500 {"error":"prediction aborted, token repeat limit reached"} when the
+    model falls into a repetition loop, which gemma3:4b does at temperature 0.7
+    roughly once in twelve calls on a long conversation. Treating it as fatal
+    ended a 40-run stability sweep at repetition 7 of 20 with a working agent.
+    """
+
+    @staticmethod
+    def _response(status, payload=None, body=""):
+        response = Mock()
+        response.status_code = status
+        if payload is None:
+            response.json.side_effect = ValueError("not json")
+            response.text = body
+        else:
+            response.json.return_value = payload
+        if status >= 400:
+            response.raise_for_status.side_effect = \
+                requests.exceptions.HTTPError(response=response)
+        else:
+            response.raise_for_status.return_value = None
+        return response
+
+    def _planner(self, responses):
+        session = Mock()
+        session.post.side_effect = responses
+        return planner_mod.Planner(session, "http://ollama.localhost:11434/api/chat",
+                                   temperature=0.7), session
+
+    def test_a_generation_failure_is_retried_and_succeeds(self):
+        good = self._response(200, {"message": {"content": '{"action": "finish"}'}})
+        aborted = self._response(
+            500, {"error": "prediction aborted, token repeat limit reached"})
+        agent, session = self._planner([aborted, aborted, good])
+
+        action = agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+
+        self.assertEqual(action["action"], "finish")
+        self.assertEqual(session.post.call_count, 3,
+                         "the identical request should have been re-sent")
+
+    def test_the_retried_request_is_identical(self):
+        """No correction message: the prompt was fine, only the sample was not.
+
+        A correction here would teach the model something about a mistake it did
+        not make, and would grow the conversation that caused the problem.
+        """
+        good = self._response(200, {"message": {"content": '{"action": "finish"}'}})
+        aborted = self._response(500, {"error": "prediction aborted"})
+        agent, session = self._planner([aborted, good])
+
+        agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+
+        first, second = session.post.call_args_list
+        self.assertEqual(first.kwargs["json"]["messages"],
+                         second.kwargs["json"]["messages"])
+
+    def test_generation_failures_are_bounded(self):
+        aborted = [self._response(500, {"error": "prediction aborted"})
+                   for _ in range(planner_mod.Planner.MAX_GENERATION_ATTEMPTS)]
+        agent, session = self._planner(aborted)
+
+        with self.assertRaises(planner_mod.PlannerError) as caught:
+            agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+
+        self.assertEqual(session.post.call_count,
+                         planner_mod.Planner.MAX_GENERATION_ATTEMPTS)
+        self.assertIn("could not generate", str(caught.exception))
+
+    def test_a_connection_failure_is_still_fatal_on_the_first_try(self):
+        """The distinction the change exists to preserve.
+
+        Another sample does not fix a server that is not there, and retrying it
+        turns one clear error into several confusing ones.
+        """
+        session = Mock()
+        session.post.side_effect = requests.exceptions.ConnectionError("refused")
+        agent = planner_mod.Planner(session, "http://ollama.localhost:11434/api/chat")
+
+        with self.assertRaises(planner_mod.PlannerError):
+            agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+        self.assertEqual(session.post.call_count, 1)
+
+    def test_a_4xx_is_still_fatal(self):
+        """A bad request is not sampling luck, so it must not be retried."""
+        agent, session = self._planner([self._response(400, {"error": "bad schema"})])
+
+        with self.assertRaises(planner_mod.PlannerError):
+            agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+        self.assertEqual(session.post.call_count, 1)
+
+    def test_the_server_error_text_is_surfaced_and_bounded(self):
+        agent, _ = self._planner(
+            [self._response(500, {"error": "x" * 500})
+             for _ in range(planner_mod.Planner.MAX_GENERATION_ATTEMPTS)])
+
+        with self.assertRaises(planner_mod.PlannerError) as caught:
+            agent.next_action([{"role": "user", "content": "go"}], ("crm_lookup",))
+        message = str(caught.exception)
+        self.assertIn("xxx", message)
+        self.assertLess(len(message), 400, "the server's text should be truncated")
