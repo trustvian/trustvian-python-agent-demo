@@ -83,18 +83,39 @@ POST -> export.localhost        a behavior
 GET  -> crm.localhost           a behavior
 ```
 
-There is no path in that, and no tool name. Trustvian does **not** see
-`export_customer`; it sees a POST to a host the reference never contacted. So:
+That was the whole picture until Trustvian
+[task 075](../trustvian/docs/tasks/v1.0/075-ai-semantic-telemetry-normalization.md)
+shipped. Now a behavior can be the tool itself:
 
-- a new tool that talks to a **new service** is detected — that is the demo;
-- a new tool that reuses an **existing service through a different path** is
-  **not** detected. `GET crm.localhost/crm/customers/42/export` and
-  `GET crm.localhost/crm/customers/42` are one behavior.
+```text
+tool · export_customer           a behavior — what the model chose
+POST -> export.localhost         a behavior — where it went
+```
 
-Tool-level fidelity — a tool call named as a tool call — is Trustvian
-[task 075](../trustvian/docs/tasks/v1.0/075-ai-semantic-telemetry-normalization.md).
-This repository probes for it at runtime rather than assuming it, and will
-report tool names the moment the telemetry carries them.
+**Both, for one tool call.** 075 reads the OpenTelemetry GenAI convention, so a
+span carrying `gen_ai.operation.name=execute_tool` and `gen_ai.tool.name`
+becomes a behavior named by the tool, and the HTTP call it made stays visible
+underneath it.
+
+The agent does not emit that span, and must not: it imports neither Trustvian
+nor OpenTelemetry. `harness/run_agent.py` does — see
+[The harness](#the-harness-and-why-it-is-not-the-agent).
+
+What this changes about what is detected:
+
+- a new tool that talks to a **new service** is detected twice over, at both
+  layers;
+- a new tool that reuses an **existing service through a different path** is now
+  detected at the tool layer, where before it was invisible.
+  `GET crm.localhost/crm/customers/42/export` and
+  `GET crm.localhost/crm/customers/42` are still one *transport* behavior, but
+  `export_customer` and `crm_lookup` are two tool behaviors.
+
+One caveat, measured rather than assumed: the fidelity indicator that says
+*which* of the two a behavior is does not currently reach the control plane
+through the Collector — see
+[`docs/upstream/081-fidelity-ingest-gap.md`](docs/upstream/081-fidelity-ingest-gap.md).
+The behavior *names* are correct; only the label qualifying them is missing.
 
 ## The agent
 
@@ -103,14 +124,86 @@ machine, then performs that action as a real HTTP call. One bounded loop, one
 model call per turn, and the model owns action selection — the workflow order
 is not written in Python.
 
-```text
-reference   crm_lookup, knowledge_search, send_email
-candidate   crm_lookup, knowledge_search, export_customer, send_email
-```
+Eight tools on the reference side, nine on the candidate, each with its own
+host:
+
+| tool | method | host | needed by |
+|---|---|---|---|
+| `crm_lookup` | GET | `crm.localhost` | every ticket |
+| `knowledge_search` | GET | `knowledge.localhost` | two tickets; optional on two more |
+| `billing_lookup` | GET | `billing.localhost` | the billing ticket |
+| `account_history` | GET | `history.localhost` | two tickets |
+| `escalate_ticket` | POST | `escalation.localhost` | two tickets; optional on one |
+| `attach_diagnostics` | POST | `diagnostics.localhost` | no ticket; plausible on two |
+| `share_with_partner` | POST | `partner.localhost` | **no ticket at all** |
+| `send_email` | POST | `mail.localhost` | every ticket |
+| `export_customer` *(candidate only)* | POST | `export.localhost` | the candidate's policy |
+
+**The width is the measurement.** With three tools that every ticket needed, a
+run's behavior set was saturated: for a behavior to be absent the model would
+have had to skip a tool for every ticket in the run, so presence was 10/10 for
+everything and there was nothing for a k-of-N gate to absorb. Eight tools and
+five tickets needing between two and four of them make *which* services a run
+reaches a real choice.
+
+`share_with_partner` is needed by nothing and available on both sides,
+deliberately. Every time it appears, it appeared because the model decided to —
+which makes it the cleanest presence probe in the set, and a gate that counts it
+as an added behavior is producing a false FAIL.
+
+The prompt asks for "whichever of the available tools fit this ticket" rather
+than naming a sequence. That is load-bearing: with a prescribed sequence the
+toolset widens and the choice does not, and a stability sweep would measure the
+prompt rather than the model.
 
 `agent/main.py` and `agent/planner.py` run identically in both modes. Only the
 system prompt and the tool allowlist change — see `TOOL_NAMES_REFERENCE` and
-`TOOL_NAMES_CANDIDATE` in `agent/tools.py`.
+`TOOL_NAMES_CANDIDATE` in `agent/tools.py`. The response schema needed no new
+field for the five added tools: its `action` enum is built from the allowlist,
+and every tool reads one of the five scalars already there.
+
+## The harness, and why it is not the agent
+
+`agent/` imports neither Trustvian nor OpenTelemetry, and
+`agent/requirements.txt` declares neither. That is the claim this demo makes, so
+the `execute_tool` span cannot come from inside the agent.
+
+```text
+agent/     the application under test. No Trustvian, no OpenTelemetry.
+tools/     this repository's own tooling, in its own interpreter.
+harness/   runs in the agent's interpreter, imports OpenTelemetry,
+           and is imported by nothing under agent/ or fixtures/.
+```
+
+`harness/run_agent.py` rebinds `agent.tools.dispatch` at import time to a strict
+pass-through that opens one span per dispatch. It cannot live in `tools/`: that
+interpreter holds PyYAML and nothing else, so it cannot import `requests` and
+therefore cannot import `agent.tools` at all.
+
+The span is the **parent** of the HTTP span, not a child. The HTTP span is
+created inside `dispatch` by the `requests` instrumentation, so a wrapper around
+`dispatch` necessarily opens before it and closes after — which is why both
+appear.
+
+It emits exactly two attributes, `gen_ai.operation.name` and
+`gen_ai.tool.name`. No arguments, no results, no description. `make smoke`
+asserts the harness imports no Trustvian package and that nothing the
+application runs imports the harness, because a file-level isolation the process
+violated would be true of the files and false of the thing being measured.
+
+**`record_exception=False` is load-bearing.** OpenTelemetry's default attaches
+`str(exc)` to the span as an event, and a `ToolError` quotes the model's own
+argument — so the default publishes tool arguments *and* a stack trace carrying
+the build machine's directory layout. Putting the flag back makes
+`tests/test_wrapper_passthrough.py` fail on a planted canary, which is how that
+is known rather than assumed.
+
+That file is the proof the wrapper is honest, and it runs in CI with no model:
+arguments by identity, the return value, exceptions by object, one call in and
+one call out, exactly one span per dispatch, an attribute set named rather than
+counted, and content canaries in both an argument and an exception message.
+Comparing model runs could not prove this — a wrapper that dropped every third
+call would still produce two similar-looking behavior sets.
 
 ```text
 local Python agent
@@ -381,6 +474,32 @@ trustvian-workspace/
 Set `TRUSTVIAN_DIR` to override. `scripts/bootstrap.sh` fails immediately, by
 name, if the checkout is missing or does not carry the Collector's evaluation
 sink.
+
+### Or a downloaded release, with no Go toolchain
+
+Trustvian's release archives for macOS and Linux carry `trustvian-local` and
+`trustvian-collector` beside `trustvian`, so this demo can run without building
+anything:
+
+```bash
+tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz
+TRUSTVIAN_RELEASE_DIR=$PWD/trustvian_v0.10.0_darwin_arm64 make smoke
+```
+
+`make release-smoke TRUSTVIAN_RELEASE_DIR=<dir>` does that end to end from a
+clean `.demo/bin`, so it cannot pass on binaries a checkout build left behind.
+
+Setting both `TRUSTVIAN_DIR` and `TRUSTVIAN_RELEASE_DIR` is an error naming
+both, not a precedence rule: two sources of the same three binaries is the
+ambiguity that produces "which Trustvian did I just measure?", and every number
+in `docs/results/` is attributed to one commit.
+
+**The checkout stays the default, and CI only ever uses it.** This repository
+exists to catch a Trustvian change that breaks it, and a release-pinned CI job
+would be blind to precisely that. The release path is for reproducing a
+published measurement, and it is hand-tested rather than guarded — which is why
+`make release-smoke` exists as a target you can run rather than a job that runs
+itself.
 
 ### Bootstrap is idempotent
 
