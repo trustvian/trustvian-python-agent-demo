@@ -260,6 +260,97 @@ class DevAdoptionTest(unittest.TestCase):
                           "clean.sh did not name the path dev reported")
 
 
+class OllamaReadinessTest(unittest.TestCase):
+    """The readiness gate must prove the model, at the agent's own address.
+
+    Both halves are load-bearing and both used to be wrong:
+
+    * the probe checked ``127.0.0.1`` while the agent calls ``ollama.localhost``,
+      which resolves to ``::1`` first on macOS while Ollama binds IPv4 only;
+    * the probe was ``GET /api/version`` plus ``ollama list``, neither of which
+      loads the model or generates a token — and a *suspended* server passes a
+      connect check, because it keeps its listening socket.
+    """
+
+    def test_the_orchestration_agrees_with_the_agent_on_the_address(self):
+        """The one duplication, pinned rather than trusted.
+
+        ``agent/planner.py`` cannot be imported by the tooling virtualenv (it
+        pulls in ``requests``), so the host and port are written in three places.
+        This is what makes that safe.
+        """
+        from agent import planner
+        sys.path.insert(0, str(ROOT / "tools"))
+        from tvdemo import world
+
+        self.assertEqual(world.AGENT_OLLAMA_HOST, planner.OLLAMA_HOST)
+        self.assertEqual(world.AGENT_OLLAMA_PORT, planner.OLLAMA_PORT)
+        lib = LIB.read_text()
+        self.assertIn(f'OLLAMA_HOST_FOR_AGENT="{planner.OLLAMA_HOST}"', lib)
+        self.assertIn(f'OLLAMA_PORT_FOR_AGENT="{planner.OLLAMA_PORT}"', lib)
+
+    def test_the_gate_probes_the_agents_url_not_the_loopback_one(self):
+        """Asserted on the variable, not on the string "127.0.0.1".
+
+        That string legitimately appears in the failure message, which explains
+        why the gate does *not* use it — so a blunt search flags the
+        documentation along with the defect. What must not appear is
+        ``$OLLAMA_API``, the loopback-only endpoint: using it here is the actual
+        mistake, and it is the only way this function could probe the wrong
+        address.
+        """
+        body = function_body(LIB, "require_model_answers")
+        self.assertIn("$OLLAMA_AGENT_API/api/chat", body)
+        self.assertNotIn("$OLLAMA_API", body)
+
+    def test_the_gate_makes_a_real_generation(self):
+        # /api/version and /api/tags both answer without the model being loaded.
+        body = function_body(LIB, "require_model_answers")
+        self.assertIn("/api/chat", body)
+        self.assertIn("$OLLAMA_MODEL_NAME", body)
+        self.assertIn(".message.content", body)
+
+    def test_the_gate_never_prints_the_model_reply(self):
+        # It is a completion. Invariant 7 of the design doc admits no exemption
+        # for a readiness probe, so only the fact and the duration are reported.
+        body = function_body(LIB, "require_model_answers")
+        self.assertNotIn('log "$reply', body)
+        self.assertNotIn('echo "$reply', body)
+        self.assertNotIn('printf .*$reply', body)
+
+    def test_ensure_ollama_runs_the_gate(self):
+        self.assertIn("require_model_answers", function_body(LIB, "ensure_ollama"))
+
+    def test_a_silent_server_is_told_apart_from_an_absent_one(self):
+        # Starting a second server against a held port reports "address already
+        # in use", which describes the symptom and hides the cause.
+        body = function_body(LIB, "ensure_ollama")
+        self.assertIn("port_is_listening", body)
+        self.assertIn("not\n       answering HTTP", body)
+
+    def test_the_python_side_checks_the_same_way(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        source = (ROOT / "tools" / "tvdemo" / "world.py").read_text()
+        self.assertIn("/api/chat", source)
+        self.assertIn("_port_is_listening", source)
+        # And it must not have kept the old loopback-only probe.
+        self.assertNotIn('OLLAMA_API = "http://127.0.0.1:11434"', source)
+
+    def test_the_agent_itself_gained_no_readiness_check(self):
+        """The application under test stays free of scaffolding.
+
+        The fix belongs in the orchestration. A readiness probe inside
+        ``agent/planner.py`` would be test code in the application whose
+        isolation this whole repository exists to demonstrate — and the agent
+        failing on its first call when nobody answers is correct behavior.
+        """
+        source = (ROOT / "agent" / "planner.py").read_text()
+        for smell in ("api/version", "api/tags", "require_", "readiness",
+                      "is_up", "ping"):
+            with self.subTest(pattern=smell):
+                self.assertNotIn(smell, source)
+
+
 class CapabilityProbeTest(unittest.TestCase):
     """Every Trustvian capability is asked for at runtime, never assumed."""
 

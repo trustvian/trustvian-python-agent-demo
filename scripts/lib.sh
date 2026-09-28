@@ -53,13 +53,43 @@ AGENT_STREAM="${AGENT_STREAM:-no}"
 # The model this demo is built around. OLLAMA_MODEL overrides it for advanced
 # use; everything documented and tested here uses gemma3:4b.
 OLLAMA_MODEL_NAME="${OLLAMA_MODEL:-gemma3:4b}"
-# Deliberately not the same address the agent calls. This probe wants the
-# most reliable address, 127.0.0.1; the agent calls ollama.localhost instead
-# because a hostname is what makes the model call legible as its own
-# behaviour in the engine's diff (see planner.default_url). Both hardcode
-# port 11434, so a non-default Ollama bind fails here as a readiness timeout
-# rather than as a named mismatch.
+
+# Two addresses for the same server, and the distinction is load-bearing.
+#
+# OLLAMA_API is 127.0.0.1, used only to decide whether a server is already
+# running and to wait for one this script starts. It is the most reliable
+# address there is.
+#
+# OLLAMA_AGENT_API is the address **the agent itself calls**, and it is what the
+# readiness gate below actually proves. The agent uses a hostname because that is
+# what makes the model call legible as its own behavior in the engine's diff (see
+# planner.default_url), and the two are not interchangeable:
+#
+#   $ python3 -c 'import socket; print(socket.getaddrinfo("ollama.localhost", 11434))'
+#   [AF_INET6 ::1, AF_INET 127.0.0.1]
+#   $ lsof -nP -iTCP:11434 -sTCP:LISTEN
+#   ollama ... TCP 127.0.0.1:11434 (LISTEN)        # IPv4 only
+#
+# Measured on macOS: `ollama.localhost` resolves to ::1 *first*, and Ollama binds
+# IPv4 only. The agent's calls work only because the client retries the next
+# address after ::1 refuses. Where ::1 is filtered rather than refused — a
+# hardened host, some container networks — every model call would hang for its
+# connect timeout while a 127.0.0.1 probe stayed green. So the gate probes the
+# agent's own URL.
+#
+# These must agree with agent/planner.py, which cannot be imported here (it is
+# the application under test and pulls in `requests`). tests/test_demo_contract.py
+# asserts they match, the same way the model name is already pinned.
+OLLAMA_HOST_FOR_AGENT="ollama.localhost"
+OLLAMA_PORT_FOR_AGENT="11434"
 OLLAMA_API="http://127.0.0.1:11434"
+OLLAMA_AGENT_API="http://${OLLAMA_HOST_FOR_AGENT}:${OLLAMA_PORT_FOR_AGENT}"
+
+# How long one readiness generation may take.
+#
+# Generous, because the first call to a model loads it into memory and that is
+# the slow case on a laptop — the same reason planner.REQUEST_TIMEOUT is 180.
+OLLAMA_READY_TIMEOUT="${OLLAMA_READY_TIMEOUT:-180}"
 OLLAMA_STARTED="no"
 OLLAMA_PID=""
 
@@ -210,6 +240,22 @@ s = socket.socket()
 s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])
 s.close()'
+}
+
+# port_is_listening reports whether anything accepts a connection there.
+#
+# Deliberately weaker than an HTTP probe, and used only to tell "nothing is
+# there" apart from "something is there but silent" — which are two different
+# problems with two different fixes, and reporting the second as the first is how
+# a developer ends up reading about a port conflict they do not have.
+#
+# python3 rather than lsof or ss: it is already a hard dependency here, and the
+# alternatives differ between macOS and Linux.
+port_is_listening() {
+    python3 -c 'import socket, sys
+s = socket.socket()
+s.settimeout(2)
+sys.exit(0 if s.connect_ex((sys.argv[1], int(sys.argv[2]))) == 0 else 1)' "$1" "$2"
 }
 
 # free_port_pair asks the OS for two DIFFERENT unused ports. Two independent
@@ -425,6 +471,27 @@ ensure_ollama() {
     if curl -fsS -o /dev/null --max-time 2 "$OLLAMA_API/api/version" 2>/dev/null; then
         OLLAMA_STARTED="no"
         log "reusing the Ollama server already running at $OLLAMA_API"
+    elif port_is_listening 127.0.0.1 "$OLLAMA_PORT_FOR_AGENT"; then
+        # Something holds the port and does not answer. Starting a second server
+        # is not the answer — it cannot bind, and the failure it reports is
+        # "address already in use", which describes the symptom and hides the
+        # cause. Measured: a suspended `ollama serve` (ps STAT T) produces exactly
+        # this, and the old code path reported a port conflict for it.
+        fail "something is listening on port $OLLAMA_PORT_FOR_AGENT but is not
+       answering HTTP.
+
+       That is not 'no server' and not 'port in use by something else' — a
+       process holding the socket still lets the kernel complete a TCP
+       handshake, so a connect check passes while nothing ever replies.
+
+       The usual cause is a suspended or wedged Ollama:
+
+           ps -o pid,stat,command= -p \$(pgrep -f 'ollama serve')
+
+       A STAT of 'T' means stopped. Resume it with 'kill -CONT <pid>', or stop
+       it with 'kill <pid>' and re-run so this script starts its own.
+
+       Nothing was started, because a second server cannot bind that port."
     else
         log "starting ollama serve"
         ollama serve >"$RUNTIME_DIR/ollama.log" 2>&1 &
@@ -468,6 +535,82 @@ $(tail -20 "$RUNTIME_DIR/ollama.log")"
        Check your network connection and that the model name is correct."
         log "$OLLAMA_MODEL_NAME pulled"
     fi
+
+    # And finally: prove the model actually answers, on the address the agent
+    # will use. Everything above this line proves a *server*; this proves a
+    # *model*.
+    require_model_answers
+}
+
+# require_model_answers asks the model one question and requires a reply.
+#
+# This is the gate, and the three cheaper checks it replaces all pass in
+# situations where the agent cannot work:
+#
+#   a TCP connect            passes against a *stopped* server. Measured: a
+#                            suspended `ollama serve` (ps STAT T) keeps its
+#                            listening socket, so the kernel completes the
+#                            handshake from the backlog and nothing ever answers.
+#   GET /api/version         answers without the model being loaded, or present.
+#   `ollama list`            reads metadata from disk. A model whose weights are
+#                            corrupt, or too large for available memory, is
+#                            listed and then fails on first use.
+#
+# So the check is a real POST /api/chat with the configured model, through
+# OLLAMA_AGENT_API — which also exercises the hostname resolution the agent
+# depends on. num_predict is tiny because the answer's content is irrelevant;
+# what is being established is that a generation completes.
+#
+# Nothing of the reply is printed. It is a model completion, and invariant 7 of
+# the design doc says no completion appears in anything this repository
+# publishes — a readiness probe is not an exemption. Only the fact that it came
+# back, and how long it took, are reported.
+#
+# This runs before any evaluation run exists, so it contributes no telemetry and
+# no behavioral record.
+require_model_answers() {
+    local body started elapsed reply
+    started=$SECONDS
+
+    # -f is deliberately absent: a non-2xx answer carries Ollama's own error
+    # message, and reporting that is far more useful than reporting that curl
+    # saw a bad status.
+    body="$(curl -sS --max-time "$OLLAMA_READY_TIMEOUT" \
+        -X POST "$OLLAMA_AGENT_API/api/chat" \
+        -H 'content-type: application/json' \
+        -d "{\"model\":\"$OLLAMA_MODEL_NAME\",\"stream\":false,
+             \"messages\":[{\"role\":\"user\",\"content\":\"Reply with: ok\"}],
+             \"options\":{\"temperature\":0,\"num_predict\":4}}" 2>&1)" || {
+        fail "the model did not answer at $OLLAMA_AGENT_API within ${OLLAMA_READY_TIMEOUT}s.
+
+       That address is the one agent/planner.py calls, and it is checked here
+       rather than 127.0.0.1 on purpose: '$OLLAMA_HOST_FOR_AGENT' may resolve to
+       ::1 first while Ollama binds IPv4 only, so a 127.0.0.1 probe can pass
+       while every model call fails.
+
+       Things that produce exactly this, in order of likelihood:
+         - the server is suspended or wedged. Check: ps -o stat= -p \$(pgrep -f 'ollama serve')
+           A 'T' means stopped — it still accepts connections and never answers.
+         - $OLLAMA_MODEL_NAME does not fit in available memory.
+         - $OLLAMA_HOST_FOR_AGENT does not resolve to a loopback address the
+           server is listening on.
+
+       curl said: $body"
+    }
+
+    reply="$(printf '%s' "$body" | jq -r '.message.content // empty' 2>/dev/null || true)"
+    if [ -z "$reply" ]; then
+        # An error envelope, or a 200 with nothing usable in it. Either way the
+        # agent's very first turn would fail, so this stops now.
+        fail "$OLLAMA_AGENT_API answered, but not with a usable model reply.
+
+       The agent's first turn would fail the same way. Ollama's answer:
+       $(printf '%s' "$body" | head -c 400)"
+    fi
+
+    elapsed=$(( SECONDS - started ))
+    # The reply itself is never printed — see the comment above.
+    log "$OLLAMA_MODEL_NAME answered at $OLLAMA_AGENT_API in ${elapsed}s"
 }
 
 # --- mock services ----------------------------------------------------
