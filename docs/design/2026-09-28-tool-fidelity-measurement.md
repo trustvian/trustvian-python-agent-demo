@@ -440,7 +440,93 @@ Stated in advance so a null result is not quietly reinterpreted:
   runner sat in process state `T` — stopped. PR #8 is the gate for exactly that
   and is still open; it should land before the sweep runs.
 
-## 5. Decisions I would like from you
+## 5. Bootstrap: a checkout or a downloaded release
+
+Trustvian's [#114](https://github.com/trustvian/trustvian/pull/114) ships
+`trustvian-local` and `trustvian-collector` in the macOS and Linux release
+archives beside `trustvian`, closing the item ADR 0043 left open. So this
+repository no longer *needs* a Go toolchain and a sibling checkout to run —
+though that stays the default, because it is what the demo is for.
+
+### One variable
+
+```text
+TRUSTVIAN_DIR          a sibling checkout        default: ../trustvian
+TRUSTVIAN_RELEASE_DIR  an extracted release      unset by default
+```
+
+`TRUSTVIAN_RELEASE_DIR` set means "use these binaries, build nothing". Setting
+both is a usage error naming both, rather than a precedence rule nobody
+remembers — two sources of the same three binaries is exactly the ambiguity that
+produces "which Trustvian did I just measure?", and this repository's whole
+output is a number attributed to a specific commit.
+
+```bash
+# The default, unchanged
+make bootstrap
+
+# From a downloaded release
+curl -sLO .../trustvian_v0.10.0_darwin_arm64.tar.gz
+tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz
+TRUSTVIAN_RELEASE_DIR=$PWD/trustvian_v0.10.0_darwin_arm64 make bootstrap
+```
+
+### What changes inside `scripts/bootstrap.sh`
+
+Section 2 (the checkout requirement) and section 3 (the build) each gain a
+release branch. Everything downstream is untouched: the three binaries land in
+`$BIN_DIR` exactly as today, so `lib.sh` still exports `TRUSTVIAN_LOCAL_BIN` and
+`TRUSTVIAN_COLLECTOR_BIN` from one place and no scenario, scenario runner or
+test changes at all.
+
+**Copied into `$BIN_DIR`, not symlinked and not pointed at in place.** A symlink
+breaks when someone moves or deletes the download, and it would break *later* —
+mid-sweep, after twenty minutes of model time. Pointing `$BIN_DIR` at the
+release directory would mean two possible layouts for everything downstream.
+Copying 80 MB once is the cheapest of the three and leaves one code path.
+
+### Three checks that have to change shape
+
+The checkout path validates things that do not exist in an archive, and each
+needs an honest equivalent rather than being skipped:
+
+| Checkout check | Release equivalent |
+|---|---|
+| four source markers (`go.mod`, `cmd/trustvian`, `platform/cmd/trustvian-local`, `processor/cmd/trustvian-collector`) | three executables present and executable; the diagnostic names the archive layout, since the likely mistake is pointing at the `.tar.gz` or at the directory above it |
+| `grep 'mapstructure:"evaluation' processor/config.go` — does this checkout have the Collector evaluation sink | **the presence of the two helpers is the proof.** No archive shipped them before #114, and the evaluation sink landed long before that, so a release directory containing all three is necessarily new enough. Stated in a comment, because "we dropped the capability check" would otherwise read as an oversight |
+| build stamp = `git HEAD` + dirty marker | `trustvian version`, recorded in the same `.build-stamp` file, so a re-run with a different release rebuilds and a re-run with the same one does not |
+
+That middle row is the one I want to flag rather than bury. It is a real
+argument, not a convenience: it holds only while #114 is the first release to
+carry the helpers. If a later release ever drops one, the argument lapses and
+the check needs a version floor instead. The comment says so.
+
+### What it buys, and what it does not
+
+It buys a reader of `docs/results/` the ability to reproduce a published number
+without a Go toolchain — which matters for a repository whose output is
+measurements other people should be able to check.
+
+It does **not** buy anything for CI, which builds from the checkout and should:
+CI's job is to catch a Trustvian change that breaks this demo, and pinning it to
+a published release would make it blind to exactly that. The default stays the
+checkout for the same reason.
+
+**Not in the sweep.** Every number in `docs/results/` is measured from a
+checkout at a named commit, and the results documents already record that
+commit. A release-built sweep would be a second configuration to explain for no
+measurement gain, so this lands as a bootstrap capability and the measurement
+keeps using the checkout.
+
+**One comment goes stale.** `scripts/bootstrap.sh:121` explains why it builds
+the helpers from the nested modules: "`trustvian dev` supervises both and
+neither is part of the released `trustvian` binary". Still true of the *binary*
+and now misleading about the *release*, which is the reading that matters where
+the sentence sits. C2 corrects it to say they are separate binaries because the
+root CLI must not import `trustvian-platform`, which is the durable reason and
+the one that survives the archive changing.
+
+## 6. Decisions I would like from you
 
 1. **`harness/` as a third top-level directory**, since the brief's `tools/` is
    mechanically impossible (§ 1). If you would rather it live somewhere else,
@@ -468,3 +554,12 @@ Stated in advance so a null result is not quietly reinterpreted:
    well-understood fix, and the indicator task 075 shipped does not currently
    reach any operator through the Collector path, so it may deserve more than a
    note.
+5. **`TRUSTVIAN_RELEASE_DIR` as the variable name**, and setting both it and
+   `TRUSTVIAN_DIR` being an error rather than a precedence rule (§ 5). If you
+   would rather one win silently, say which — but I would not choose that for a
+   repository that publishes numbers attributed to a commit.
+6. **Whether the release path should be exercised by a CI job.** I lean no: CI
+   builds from the checkout precisely so it catches a Trustvian change that
+   breaks this demo, and a release-pinned job would be blind to that. The cost
+   of leaning no is that the release path is documented and hand-tested rather
+   than guarded, and it can rot quietly.
