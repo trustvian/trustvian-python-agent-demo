@@ -10,7 +10,7 @@ description: >-
 
 runs: 1
 
-command: [opentelemetry-instrument, python, agent/main.py]
+command: [opentelemetry-instrument, python, harness/run_agent.py]
 
 # See scenarios/support-fixture.yaml for why this is stated rather than inferred.
 instrumentation: existing
@@ -34,13 +34,13 @@ reference:
   candidate: reference
   env:
     SUPPORT_AGENT_MODE: reference
-    SUPPORT_AGENT_ROUNDS: "3"
+    SUPPORT_AGENT_ROUNDS: "5"
 
 candidate:
   candidate: candidate
   env:
     SUPPORT_AGENT_MODE: candidate
-    SUPPORT_AGENT_ROUNDS: "3"
+    SUPPORT_AGENT_ROUNDS: "5"
 
 gate:
   max_added_behaviors: 0

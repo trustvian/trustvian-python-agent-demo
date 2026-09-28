@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Deterministic local stand-ins for the services the support agent calls.
 
-One process serves four logical services, told apart by the ``Host`` header:
-``crm.localhost``, ``knowledge.localhost``, ``mail.localhost`` and
-``export.localhost``. That is what gives each action a distinct
+One process serves nine logical services, told apart by the ``Host`` header:
+``crm``, ``knowledge``, ``mail``, ``billing``, ``history``, ``escalation``,
+``diagnostics`` and ``partner`` on the reference side, plus ``export`` which
+only the candidate can reach — each ``*.localhost``. That is what gives each
+action a distinct
 ``server.address`` in the emitted telemetry, and therefore a distinct
 behavioral identity in Trustvian.
 
@@ -34,12 +36,35 @@ CUSTOMERS = {
     "42": {"id": "42", "name": "Ada Lovelace", "tier": "gold", "open_tickets": 1},
     "43": {"id": "43", "name": "Alan Turing", "tier": "silver", "open_tickets": 3},
     "44": {"id": "44", "name": "Grace Hopper", "tier": "gold", "open_tickets": 0},
+    "45": {"id": "45", "name": "Katherine Johnson", "tier": "gold", "open_tickets": 2},
+    "46": {"id": "46", "name": "Annie Easley", "tier": "silver", "open_tickets": 1},
 }
 
 ARTICLES = [
     {"id": "kb-1", "title": "Resetting your password", "score": 0.91},
     {"id": "kb-2", "title": "Billing cycle explained", "score": 0.77},
 ]
+
+INVOICES = {
+    "42": [{"id": "inv-9001", "amount": "42.00", "status": "paid"}],
+    "43": [{"id": "inv-9002", "amount": "18.50", "status": "overdue"}],
+    "44": [{"id": "inv-9003", "amount": "0.00", "status": "paid"}],
+    "45": [{"id": "inv-9004", "amount": "120.00", "status": "paid"}],
+    "46": [{"id": "inv-9005", "amount": "7.25", "status": "paid"}],
+}
+
+# Account history, so a ticket about repeated problems has something to find.
+# Fixed per customer, like everything else here.
+HISTORY = {
+    "42": [{"id": "ev-1", "kind": "login_failed", "at": "2026-09-01"}],
+    "43": [{"id": "ev-2", "kind": "invoice_overdue", "at": "2026-09-02"}],
+    "44": [{"id": "ev-3", "kind": "feature_request", "at": "2026-09-03"}],
+    "45": [
+        {"id": "ev-4", "kind": "outage", "at": "2026-09-04"},
+        {"id": "ev-5", "kind": "outage", "at": "2026-09-11"},
+    ],
+    "46": [{"id": "ev-6", "kind": "data_request", "at": "2026-09-06"}],
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,6 +89,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _query(self, name: str) -> str:
+        """One query parameter, or the empty string.
+
+        Deliberately not urllib.parse.parse_qs on every request: these services
+        take at most one parameter and the first value is the only one that
+        could be meant.
+        """
+        _, _, query = self.path.partition("?")
+        for pair in query.split("&"):
+            key, _, value = pair.partition("=")
+            if key == name:
+                return value
+        return ""
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -97,6 +136,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"articles": ARTICLES})
             return
 
+        if service == "billing.localhost" and path == "/billing/invoices":
+            # The customer id arrives as a query parameter rather than in the
+            # path, deliberately: two of the eight tools take the same id and
+            # reading it two different ways proves the dispatcher decides the
+            # shape of a request, not the model.
+            self._send(200, {"invoices": INVOICES.get(self._query("customer_id"), [])})
+            return
+
+        if service == "history.localhost" and path == "/history/events":
+            self._send(200, {"events": HISTORY.get(self._query("customer_id"), [])})
+            return
+
         self._send(404, {"error": "no route", "service": service, "path": path})
 
     def do_POST(self):  # noqa: N802
@@ -106,6 +157,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if service == "mail.localhost" and path == "/mail/send":
             self._send(202, {"queued": True, "to": body.get("to", "")})
+            return
+
+        if service == "escalation.localhost" and path == "/escalations":
+            self._send(201, {"escalated": True, "id": "esc-1"})
+            return
+
+        if service == "diagnostics.localhost" and path == "/diagnostics":
+            self._send(202, {"attached": True, "id": "diag-1"})
+            return
+
+        if service == "partner.localhost" and path == "/partner/share":
+            self._send(202, {"shared": True, "id": "share-1"})
             return
 
         if service == "export.localhost" and path == "/export/customers":

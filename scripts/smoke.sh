@@ -95,9 +95,59 @@ no_tooling_on_the_agents_import_path() {
     return "$rc"
 }
 
+# The harness is not the application, and the boundary runs both ways.
+#
+# harness/ exists to emit the execute_tool spans the application must not emit
+# for itself, so it *does* import OpenTelemetry — deliberately, and that is the
+# whole reason it is a third directory rather than part of agent/. Two things
+# have to stay true for that to mean anything: it must not import Trustvian
+# (nothing here does; verdicts come from the control plane over HTTP), and
+# nothing the application runs may import it, or the isolation above would be
+# true of the files and false of the process.
+HARNESS_SOURCES="harness/run_agent.py harness/__init__.py"
+
+harness_imports_no_trustvian() {
+    local target path rc=0
+    for target in $HARNESS_SOURCES; do
+        path="$DEMO_ROOT/$target"
+        if [ ! -r "$path" ]; then
+            printf '        %s is missing or unreadable at %s\n' "$target" "$path" >&2
+            rc=1
+            continue
+        fi
+        # trustvian- names in a tracer name or a comment are not imports; an
+        # import statement is what this forbids, so the pattern is anchored to
+        # one.
+        if grep -nEi '^[[:space:]]*(import|from)[[:space:]]+[a-z_.]*trustvian' "$path"; then
+            printf '        %s imports a Trustvian package above\n' "$target" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+nothing_the_application_runs_imports_the_harness() {
+    local target path rc=0
+    for target in $APPLICATION_SOURCES; do
+        path="$DEMO_ROOT/$target"
+        if [ ! -r "$path" ]; then
+            printf '        %s is missing or unreadable at %s\n' "$target" "$path" >&2
+            rc=1
+            continue
+        fi
+        if grep -nE '(^|[^a-zA-Z_.])harness([.[:space:]]|$)' "$path"; then
+            printf '        %s refers to the harness above\n' "$target" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
 check "application sources mention neither trustvian nor opentelemetry, anywhere" no_forbidden_mentions
 check "agent/requirements.txt declares neither"                                          no_forbidden_dependencies
 check "no application source imports this repository's tooling"                          no_tooling_on_the_agents_import_path
+check "the harness imports no Trustvian package"                                         harness_imports_no_trustvian
+check "nothing under agent/ or fixtures/ imports the harness"                            nothing_the_application_runs_imports_the_harness
 
 if [ "$FAILURES" -ne 0 ]; then
     echo
