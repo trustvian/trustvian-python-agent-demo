@@ -330,6 +330,25 @@ publishes.
   downloads roughly 3.3 GB for `gemma3:4b`. `make smoke` and `make scenario`
   with the fixture need no model.
 
+  Before any model-driven run starts, the orchestration **asks the model one
+  question and requires an answer**, on `ollama.localhost:11434` — the address
+  `agent/planner.py` itself calls. That is stricter than it sounds, and each part
+  of it was a real defect:
+
+  | Cheaper check | Passes when the agent cannot work |
+  |---|---|
+  | a TCP connect | a **suspended** server keeps its listening socket, so the kernel completes the handshake and nothing ever answers |
+  | `GET /api/version` | answers without the model being loaded, or present |
+  | `ollama list` | reads metadata from disk; a model too large for available memory is listed, then fails on first use |
+  | probing `127.0.0.1` | `ollama.localhost` resolves to `::1` **first** on macOS while Ollama binds IPv4 only — so the agent's calls work only because the client retries the next address. Where `::1` is filtered rather than refused, every model call hangs while a `127.0.0.1` probe stays green. |
+
+  A port held by something that does not answer is reported as exactly that,
+  with the `ps` command that shows a stopped process — not as the `address
+  already in use` a second `ollama serve` would produce.
+
+  The reply itself is never printed: it is a model completion, and no completion
+  appears in anything this repository publishes.
+
 No Docker. No API keys. No `sudo`. No external service but Ollama.
 
 Three gitignored directories in this repository hold what it generates —

@@ -203,6 +203,15 @@ identifier would start from whatever previous sweeps taught it.
 Expect roughly 50–60 minutes for N=10: twenty model-driven runs at about
 2½–3 minutes each.
 
+**Ollama's own health is now a gate, not an assumption.** During this work a
+suspended `ollama serve` (`ps` STAT `T`) kept its listening socket, so TCP
+connects succeeded and no HTTP request ever returned. The orchestration now asks
+the model one question, on the address `agent/planner.py` calls, before any
+model-driven run starts — see the Prerequisites section of the README. It has no
+effect on the figures above, which were measured against a healthy server, but it
+is why a repeat of this measurement fails fast rather than producing a sweep of
+failed runs.
+
 **Nothing else may touch this directory's `.trustvian/` while a sweep runs.**
 `make smoke`, `make demo` and `make scenario` each start a control plane there,
 and `start_runtime` deliberately stops one it finds so a second `make demo` works
