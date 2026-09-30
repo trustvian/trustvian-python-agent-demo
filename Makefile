@@ -39,6 +39,16 @@ stability: ## Measure how often an unchanged agent fails a gate against itself: 
 		--temperature "$(or $(TEMPERATURE),0.7)" \
 		--results .demo/stability-results.json
 
+fidelity-sweep: ## Task 078's re-run at tool fidelity: make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>
+	@# Every parameter is required and none has a default: the numbers this
+	@# produces are attributed to exactly the configuration that made them.
+	@test -n "$(RUNS)" -a -n "$(TEMPERATURE)" -a -n "$(TIMEOUT)" -a -n "$(RESULTS)" || \
+		{ echo "make fidelity-sweep needs RUNS, TEMPERATURE, TIMEOUT and RESULTS"; exit 2; }
+	@./scripts/bootstrap.sh >/dev/null
+	@.demo/tools-venv/bin/python tools/fidelity_sweep.py scenarios/tool-fidelity-sweep.yaml \
+		--runs "$(RUNS)" --temperature "$(TEMPERATURE)" --timeout "$(TIMEOUT)" \
+		--results "$(RESULTS)"
+
 release-smoke: ## Prove the demo runs from a downloaded release: make release-smoke TRUSTVIAN_RELEASE_DIR=<extracted archive>
 	@# Run by hand, deliberately not in CI. CI builds from the sibling checkout
 	@# so it catches a Trustvian change that breaks this demo; a release-pinned

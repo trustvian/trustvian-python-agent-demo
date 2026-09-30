@@ -30,6 +30,12 @@ GATE_LIMITS = (
     "max_critical_risk_observations",
 )
 
+# Trustvian's one optional limit (its issue 131, ADR 0052): counted behavioral
+# changes, where a tool and the transport child it calls count once. Optional
+# on the server, so optional here — and an omitted one is *not sent*, which asks
+# the server not to evaluate that check. It is never defaulted to zero.
+OPTIONAL_GATE_LIMITS = ("max_added_behavior_changes",)
+
 EVIDENCE_SOURCES = ("summary", "records")
 
 # `trustvian dev`'s own modes, and only those. The mode is passed through to it
@@ -224,7 +230,14 @@ def load(path) -> Scenario:
         if not isinstance(value, int) or value < 0:
             raise ScenarioError(f"{where}: gate.{limit} must be a non-negative integer")
         limits[limit] = value
-    unknown = set(gate) - set(GATE_LIMITS)
+    for limit in OPTIONAL_GATE_LIMITS:
+        if limit in gate:
+            value = gate[limit]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ScenarioError(
+                    f"{where}: gate.{limit} must be a non-negative integer")
+            limits[limit] = value
+    unknown = set(gate) - set(GATE_LIMITS) - set(OPTIONAL_GATE_LIMITS)
     if unknown:
         raise ScenarioError(
             f"{where}: unknown gate limit(s) {', '.join(sorted(unknown))}")

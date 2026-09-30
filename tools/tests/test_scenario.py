@@ -65,6 +65,17 @@ class ScenarioValidationTest(unittest.TestCase):
         with self.assertRaises(scenario_mod.ScenarioError):
             self.load(text)
 
+    def test_the_counted_change_limit_is_optional_and_never_defaulted(self):
+        self.assertNotIn("max_added_behavior_changes", self.load(MINIMAL).gate)
+        spec = self.load(MINIMAL + "  max_added_behavior_changes: 0\n")
+        self.assertEqual(spec.gate["max_added_behavior_changes"], 0)
+
+    def test_a_malformed_counted_change_limit_is_refused(self):
+        for bad in ("-1", "'1'", "true", "1.5"):
+            with self.subTest(value=bad):
+                with self.assertRaises(scenario_mod.ScenarioError):
+                    self.load(MINIMAL + f"  max_added_behavior_changes: {bad}\n")
+
     def test_runs_must_be_a_positive_integer(self):
         for bad in ("0", "-1", "'many'"):
             with self.subTest(runs=bad):
@@ -100,7 +111,10 @@ class CommittedScenarioTest(unittest.TestCase):
         for path in SCENARIOS:
             with self.subTest(scenario=path.name):
                 spec = scenario_mod.load(path)
-                self.assertEqual(sorted(spec.gate), sorted(scenario_mod.GATE_LIMITS))
+                # Every mandatory limit, and nothing but declared optional ones.
+                self.assertTrue(set(scenario_mod.GATE_LIMITS) <= set(spec.gate))
+                self.assertTrue(set(spec.gate) - set(scenario_mod.GATE_LIMITS)
+                                <= set(scenario_mod.OPTIONAL_GATE_LIMITS))
 
     def test_a_model_free_scenario_exists(self):
         # CI's default jobs must never need Ollama or a model.
