@@ -358,3 +358,40 @@ class AnalysisTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportTest(unittest.TestCase):
+    """The published tables are a pure function of the results file."""
+
+    def document(self, aborted=None):
+        attempts = AnalysisTest().attempts([["a", "b"], ["a"]], [["a", "x"], ["a", "x"]])
+        for a in attempts:
+            a.update(seconds=1.0, record_count=3, distinct_behavior_count=2,
+                     history_state="complete", profile_fresh=True,
+                     baseline_files_after=1, stragglers_killed=False)
+        attempts.append({"side": "candidate", "repetition": 3, "run_id": "c3",
+                         "outcome": fs.NOT_ATTEMPTED, "reason": "aborted"})
+        comparisons = [{"pair": "reference_vs_reference", "verdict": "fail",
+                        "failed_checks": ["added_behaviors"], "added_count": 1,
+                        "added_change_count": 1, "correlation_state": "complete",
+                        "change_roots": ["b"], "added_fingerprints": ["b"],
+                        "block_decisions_actual": 0, "critical_risk_actual": 0}]
+        result = {"attempts": attempts, "aborted": aborted}
+        return {"namespace": "n", "aborted": aborted, "attempts": attempts,
+                "comparisons": comparisons,
+                "method": {"runs_per_side": 2, "temperature": "0.7", "schedule": "s",
+                           "learning": "l", "timeout_seconds": 60,
+                           "max_consecutive_failures": 3, "gate_limits": {}},
+                "provenance": {"trustvian_revision": "r", "demo_commit": "c",
+                               "demo_dirty": False, "model": "m", "model_digest": "d" * 20,
+                               "model_details": {}, "ollama_version": "v"},
+                "analysis": fs.analyze(result, comparisons, 2)}
+
+    def test_rendering_is_deterministic_and_lists_every_attempt(self):
+        from tvdemo import fidelity_report
+        doc = self.document(aborted="aborted after 3")
+        first, second = fidelity_report.render(doc), fidelity_report.render(doc)
+        self.assertEqual(first, second)
+        self.assertIn("**not_attempted**", first, "an unexecuted repetition is still listed")
+        self.assertIn("aborted after 3", first)
+        self.assertIn("tool `b`: 1", first)
