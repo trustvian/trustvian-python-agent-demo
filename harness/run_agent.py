@@ -38,6 +38,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from opentelemetry import trace  # noqa: E402
+from opentelemetry.trace import Status, StatusCode  # noqa: E402
 
 from agent import tools  # noqa: E402
 
@@ -81,23 +82,34 @@ def instrument_dispatch(dispatch):
     opens before it and closes after. Both spans exist, which is the point: the
     mock-service call stays visible beneath the tool that made it.
 
-    record_exception=False is not a detail. The default attaches str(exc) to the
-    span as an event, and a ToolError message quotes the model's own argument —
-    agent.tools._require_id raises "customer_id 'x' is not a valid identifier".
-    That is content, and it would travel. The status is still set on failure,
-    which is the content-free half and the half Trustvian reads as a signal.
+    Two SDK defaults are switched off, because each copies an exception's
+    message onto the span and a ToolError message quotes the model's own
+    argument — agent.tools._require_id raises "customer_id 'x' is not a valid
+    identifier". That is content, and it would travel:
+
+      record_exception=False          no exception event carrying str(exc);
+      set_status_on_exception=False   no status description "Type: str(exc)".
+
+    The status itself is still set on failure — ERROR, with no description —
+    because the code is the content-free half and the half Trustvian reads as a
+    signal. The exception is re-raised as the same object, unchanged.
     """
     @functools.wraps(dispatch)
     def wrapper(session, port, name, action, mode):
         with _tracer.start_as_current_span(
             f"{EXECUTE_TOOL} {name}",
             record_exception=False,
+            set_status_on_exception=False,
             attributes={
                 GEN_AI_OPERATION_NAME: EXECUTE_TOOL,
                 GEN_AI_TOOL_NAME: name,
             },
-        ):
-            return dispatch(session, port, name, action, mode)
+        ) as span:
+            try:
+                return dispatch(session, port, name, action, mode)
+            except BaseException:
+                span.set_status(Status(StatusCode.ERROR))
+                raise
 
     return wrapper
 

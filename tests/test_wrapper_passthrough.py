@@ -232,6 +232,55 @@ class WrapperPassThrough(unittest.TestCase):
         self.assertEqual(len(span.events), 0,
                          f"the span carries events: {haystack}")
 
+    def test_an_exception_message_reaches_no_part_of_the_exported_span(self):
+        """The status description is a second channel, and it is closed too.
+
+        With set_status_on_exception left at its default the SDK writes
+        f"{type}: {exc}" into the span's status description — the same model
+        argument record_exception=False keeps out of the events. The span must
+        still say ERROR, with no description, and the caller must receive the
+        original exception object, unchanged.
+        """
+        from opentelemetry.trace import StatusCode
+
+        raised = ToolError("customer_id 'CANARY-IN-STATUS' is not a valid identifier")
+        recorder = Recorder([raised])
+        wrapped = run_agent.instrument_dispatch(recorder)
+
+        with self.assertRaises(ToolError) as caught:
+            wrapped(object(), "8080", "crm_lookup", {"customer_id": "x"}, "reference")
+        self.assertIs(caught.exception, raised, "the original exception must propagate")
+        self.assertEqual(caught.exception.args, raised.args)
+        self.assertEqual(len(recorder.calls), 1)
+
+        spans = self.spans()
+        self.assertEqual(len(spans), 1)
+        span = spans[0]
+        self.assertEqual(span.status.status_code, StatusCode.ERROR,
+                         "a failed dispatch must still be marked as an error")
+        self.assertIsNone(span.status.description,
+                          f"status description carries {span.status.description!r}")
+        self.assertEqual(len(span.events), 0)
+        self.assertEqual(span.name, "execute_tool crm_lookup")
+        self.assertEqual(dict(span.attributes), {
+            run_agent.GEN_AI_OPERATION_NAME: run_agent.EXECUTE_TOOL,
+            run_agent.GEN_AI_TOOL_NAME: "crm_lookup",
+        })
+        haystack = "\n".join([
+            span.name, repr(dict(span.attributes)), repr(span.status.description),
+            repr([(e.name, dict(e.attributes or {})) for e in span.events]),
+        ])
+        self.assertNotIn("CANARY-IN-STATUS", haystack)
+
+    def test_a_successful_dispatch_leaves_the_status_unset(self):
+        from opentelemetry.trace import StatusCode
+
+        wrapped = run_agent.instrument_dispatch(Recorder(["ok"]))
+        self.assertEqual(wrapped(object(), "8080", "crm_lookup", {}, "reference"), "ok")
+        span = self.spans()[0]
+        self.assertEqual(span.status.status_code, StatusCode.UNSET)
+        self.assertIsNone(span.status.description)
+
     # -----------------------------------------------------------------
     # Installation
     # -----------------------------------------------------------------
