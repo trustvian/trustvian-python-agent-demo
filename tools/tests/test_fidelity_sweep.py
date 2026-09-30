@@ -395,3 +395,98 @@ class ReportTest(unittest.TestCase):
         self.assertIn("**not_attempted**", first, "an unexecuted repetition is still listed")
         self.assertIn("aborted after 3", first)
         self.assertIn("tool `b`: 1", first)
+
+
+class AnalysisBoundTest(unittest.TestCase):
+    """The k-of-N analysis is bounded before it runs, and says how."""
+
+    def attempts(self, n_ref, n_cand):
+        out = []
+        for side, n in (("reference", n_ref), ("candidate", n_cand)):
+            for i in range(1, n + 1):
+                fps = ["x"] + (["rare"] if i == 1 else []) + (["export"] if side == "candidate" else [])
+                out.append({"side": side, "repetition": i, "run_id": f"{side}{i}",
+                            "outcome": fs.COMPLETED,
+                            "behaviors": [behavior(fp) for fp in fps],
+                            "fingerprint_order": fps})
+        return out
+
+    def test_split_totals_are_closed_form(self):
+        self.assertEqual(fs.split_total(20, 20, 10, same_side=False), 34_134_779_536)
+        self.assertEqual(fs.split_total(20, 20, 10, same_side=True), 184_756)
+        self.assertEqual(fs.split_total(10, 10, 5, same_side=True), 252)
+        self.assertEqual(fs.split_total(10, 10, 5, same_side=False), 63_504)
+        self.assertEqual(fs.split_total(64, 64, 32, same_side=False), 1_832624140942590534 ** 2)
+        self.assertEqual(fs.split_total(3, 3, 2, same_side=True), 0)
+
+    def test_the_plan_switches_to_sampling_exactly_past_the_budget(self):
+        at = fs.analysis_plan(10, budget=63_504)["analyses"]["reference_vs_candidate"]
+        over = fs.analysis_plan(10, budget=63_503)["analyses"]["reference_vs_candidate"]
+        self.assertEqual((at["mode"], at["splits_evaluated"]), ("exhaustive", 63_504))
+        self.assertEqual((over["mode"], over["splits_evaluated"]), ("sampled", 63_503))
+
+    def test_the_largest_accepted_run_count_plans_without_enumerating(self):
+        started = time.monotonic()
+        plan = fs.analysis_plan(64)
+        self.assertLess(time.monotonic() - started, 1.0)
+        for entry in plan["analyses"].values():
+            self.assertEqual(entry["mode"], "sampled")
+            self.assertEqual(entry["splits_evaluated"], fs.ANALYSIS_SPLIT_BUDGET)
+
+    def test_an_out_of_range_budget_is_refused(self):
+        for bad in (0, -1, fs.ANALYSIS_SPLIT_BUDGET_MAX + 1, True, 1.5):
+            with self.subTest(budget=bad):
+                with self.assertRaises(ValueError):
+                    fs.analysis_plan(10, budget=bad)
+
+    def test_twenty_runs_per_side_are_sampled_labelled_and_bounded(self):
+        attempts = self.attempts(20, 20)
+        started = time.monotonic()
+        result = fs.k_of_n(attempts, "reference", "candidate", 10, [1, 10], budget=50)
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(result["mode"], "sampled")
+        self.assertEqual(result["splits_total"], 34_134_779_536)
+        self.assertEqual(result["splits_evaluated"], 50)
+        self.assertIn("seed", result)
+        self.assertEqual({r["splits"] for r in result["rows"]}, {50})
+        # export is in every candidate run and no reference run: it crosses in
+        # every sampled split at every k up to the group size.
+        self.assertEqual([r["splits_crossed"] for r in result["rows"]], [50, 50])
+
+    def test_sampling_is_reproducible(self):
+        attempts = self.attempts(20, 20)
+        first = fs.k_of_n(attempts, "reference", "reference", 10, [1, 2], budget=40)
+        second = fs.k_of_n(attempts, "reference", "reference", 10, [1, 2], budget=40)
+        self.assertEqual(first, second)
+        self.assertEqual(first["mode"], "sampled")
+
+    def test_at_the_budget_the_analysis_is_exhaustive_and_says_so(self):
+        attempts = self.attempts(4, 4)
+        total = fs.split_total(4, 4, 2, same_side=True)
+        result = fs.k_of_n(attempts, "reference", "reference", 2, [1], budget=total)
+        self.assertEqual((result["mode"], result["splits_evaluated"]), ("exhaustive", total))
+        self.assertNotIn("seed", result)
+
+    def test_the_cli_refuses_a_bad_budget_before_any_workload(self):
+        import fidelity_sweep as cli
+        from tvdemo import world
+        called = []
+        saved = world.require_ollama
+        world.require_ollama = lambda *a, **k: called.append(True)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = cli.main([str(SCENARIO), "--runs", "10", "--temperature", "0.7",
+                                 "--timeout", "600", "--results", f"{tmp}/r.json",
+                                 "--analysis-split-budget", "0"])
+        finally:
+            world.require_ollama = saved
+        self.assertEqual(code, 2)
+        self.assertEqual(called, [], "no model check, let alone a workload, before the refusal")
+
+    def test_the_report_labels_a_sampled_analysis(self):
+        from tvdemo import fidelity_report
+        doc = ReportTest().document()
+        doc["analysis"]["k_of_n"]["reference_vs_candidate"] = fs.k_of_n(
+            self.attempts(20, 20), "reference", "candidate", 10, [1], budget=10)
+        text = fidelity_report.render(doc)
+        self.assertIn("**sampled** — 10 of 34,134,779,536 splits", text)

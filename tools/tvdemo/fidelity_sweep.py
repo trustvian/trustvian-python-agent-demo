@@ -37,8 +37,10 @@ import datetime
 import glob
 import itertools
 import json
+import math
 import os
 import pathlib
+import random
 import signal
 import subprocess
 import time
@@ -585,17 +587,113 @@ def order_analysis(attempts, category="tool"):
     return out
 
 
-def k_of_n(attempts, side_a, side_b, group_size, ks, j=0, category=None):
+# The offline k-of-N analysis enumerates splits of completed runs into a
+# reference group and a candidate group. That count is combinatorial — at 20
+# runs per side, groups of 10, the cross-side analysis has
+# C(20,10)^2 = 34,134,779,536 splits — so it is bounded explicitly rather than
+# by hoping N stays small.
+#
+# At or under the budget every split is evaluated and the result says
+# "exhaustive". Over it, exactly `budget` distinct splits are drawn with a
+# recorded seed and the result says "sampled", with the total beside the number
+# evaluated, in the JSON and in the rendered tables. A sampled figure is never
+# presented as an exhaustive one.
+ANALYSIS_SPLIT_BUDGET = 100_000
+ANALYSIS_SPLIT_BUDGET_MAX = 1_000_000
+ANALYSIS_SEED = "tvdemo-k-of-n-v1"
+# Rejection sampling needs more draws than distinct splits; this caps them, and
+# a shortfall is reported as fewer splits evaluated, never hidden.
+SAMPLING_DRAW_FACTOR = 20
+
+
+def split_total(n_reference, n_candidate, group_size, same_side):
+    """How many splits the analysis would evaluate exhaustively. Closed form."""
+    if group_size < 1:
+        return 0
+    if same_side:
+        if 2 * group_size > n_reference:
+            return 0
+        return math.comb(n_reference, group_size) * math.comb(n_reference - group_size, group_size)
+    if group_size > min(n_reference, n_candidate):
+        return 0
+    return math.comb(n_reference, group_size) * math.comb(n_candidate, group_size)
+
+
+def validate_budget(budget):
+    if not isinstance(budget, int) or isinstance(budget, bool) \
+            or not 1 <= budget <= ANALYSIS_SPLIT_BUDGET_MAX:
+        raise ValueError(f"the k-of-N split budget must be an integer within "
+                         f"1..{ANALYSIS_SPLIT_BUDGET_MAX}, got {budget!r}")
+    return budget
+
+
+def analysis_plan(runs, budget=ANALYSIS_SPLIT_BUDGET):
+    """What the offline analysis will cost for `runs` completed runs per side.
+
+    Computed before any workload starts, so a configuration whose exhaustive
+    analysis is out of reach is known to be sampled up front.
+    """
+    validate_budget(budget)
+    group = runs // 2
+    plan = {"group_size": group, "budget": budget, "analyses": {}}
+    for name, same in (("reference_vs_reference", True),
+                       ("reference_vs_reference_tool_only", True),
+                       ("reference_vs_candidate", False)):
+        total = split_total(runs, runs, group, same)
+        plan["analyses"][name] = {
+            "splits_total": total,
+            "mode": "exhaustive" if total <= budget else "sampled",
+            "splits_evaluated": min(total, budget),
+        }
+    return plan
+
+
+def _group_pairs(n_a, n_b, group_size, same_side):
+    """Every split, as (reference indices, candidate indices). Exhaustive only."""
+    if same_side:
+        for ref in itertools.combinations(range(n_a), group_size):
+            rest = [i for i in range(n_a) if i not in ref]
+            for cand in itertools.combinations(rest, group_size):
+                yield ref, cand
+    else:
+        for ref in itertools.combinations(range(n_a), group_size):
+            for cand in itertools.combinations(range(n_b), group_size):
+                yield ref, cand
+
+
+def _sampled_pairs(n_a, n_b, group_size, same_side, budget, rng):
+    """`budget` distinct splits drawn uniformly, without replacement."""
+    seen = set()
+    draws = 0
+    while len(seen) < budget and draws < budget * SAMPLING_DRAW_FACTOR:
+        draws += 1
+        if same_side:
+            chosen = rng.sample(range(n_a), 2 * group_size)
+            ref, cand = tuple(sorted(chosen[:group_size])), tuple(sorted(chosen[group_size:]))
+        else:
+            ref = tuple(sorted(rng.sample(range(n_a), group_size)))
+            cand = tuple(sorted(rng.sample(range(n_b), group_size)))
+        seen.add((ref, cand))
+    return sorted(seen)
+
+
+def k_of_n(attempts, side_a, side_b, group_size, ks, j=0, category=None,
+           budget=ANALYSIS_SPLIT_BUDGET, seed=ANALYSIS_SEED):
     """What task 078's repeated-added rule would have reported, offline.
 
-    For every split of side_a's completed runs into a reference group and
+    For each split of side_a's completed runs into a reference group and
     side_b's into a candidate group (disjoint when the sides are the same), a
     behavior is repeatedly added when candidate_runs_present >= k and
-    reference_runs_present <= j. Reported per k as the number of splits in
-    which at least one behavior crossed. This is **offline experimental
-    analysis** of 078's specified per-identity rule over server-returned
-    behavior sets, not the platform's aggregation and not a recommendation.
+    reference_runs_present <= j. Reported per k as the number of evaluated
+    splits in which at least one behavior crossed.
+
+    Bounded: see ANALYSIS_SPLIT_BUDGET. The result's `mode` says whether every
+    split was evaluated or a seeded sample of them. This is **offline
+    experimental analysis** of 078's specified per-identity rule over
+    server-returned behavior sets — not the platform's aggregation and not a
+    recommendation.
     """
+    validate_budget(budget)
     desc = descriptors(attempts)
 
     def sets_for(side):
@@ -604,33 +702,42 @@ def k_of_n(attempts, side_a, side_b, group_size, ks, j=0, category=None):
                       if category is None or desc[b["fingerprint_id"]]["operation_category"] == category)
             for a in attempts if a["side"] == side and a["outcome"] == COMPLETED]
 
+    same = side_a == side_b
     a_sets = sets_for(side_a)
-    b_sets = a_sets if side_a == side_b else sets_for(side_b)
-    splits = []
-    if side_a == side_b:
-        if 2 * group_size > len(a_sets):
-            return {"error": f"needs {2 * group_size} completed runs, have {len(a_sets)}"}
-        for ref in itertools.combinations(range(len(a_sets)), group_size):
-            rest = [i for i in range(len(a_sets)) if i not in ref]
-            for cand in itertools.combinations(rest, group_size):
-                splits.append(([a_sets[i] for i in ref], [a_sets[i] for i in cand]))
-    else:
-        if group_size > min(len(a_sets), len(b_sets)):
-            return {"error": f"needs {group_size} completed runs per side"}
-        for ref in itertools.combinations(range(len(a_sets)), group_size):
-            for cand in itertools.combinations(range(len(b_sets)), group_size):
-                splits.append(([a_sets[i] for i in ref], [b_sets[i] for i in cand]))
+    b_sets = a_sets if same else sets_for(side_b)
+    if same and 2 * group_size > len(a_sets):
+        return {"error": f"needs {2 * group_size} completed runs, have {len(a_sets)}"}
+    if not same and group_size > min(len(a_sets), len(b_sets)):
+        return {"error": f"needs {group_size} completed runs per side"}
 
-    rows = []
-    for k in ks:
-        crossed = 0
-        for ref_group, cand_group in splits:
-            universe = frozenset().union(*ref_group, *cand_group)
-            if any(sum(fp in s for s in cand_group) >= k
-                   and sum(fp in s for s in ref_group) <= j for fp in universe):
-                crossed += 1
-        rows.append({"k": k, "j": j, "splits": len(splits), "splits_crossed": crossed})
-    return {"group_size": group_size, "category": category or "all", "rows": rows}
+    total = split_total(len(a_sets), len(b_sets), group_size, same)
+    result = {"group_size": group_size, "category": category or "all",
+              "splits_total": total}
+    if total <= budget:
+        pairs = _group_pairs(len(a_sets), len(b_sets), group_size, same)
+        result["mode"] = "exhaustive"
+    else:
+        label = f"{seed}:{side_a}:{side_b}:{group_size}:{category or 'all'}"
+        pairs = _sampled_pairs(len(a_sets), len(b_sets), group_size, same,
+                               budget, random.Random(label))
+        result.update(mode="sampled", seed=label, sampling="uniform, without replacement")
+
+    crossed = {k: 0 for k in ks}
+    evaluated = 0
+    for ref, cand in pairs:
+        evaluated += 1
+        ref_group = [a_sets[i] for i in ref]
+        cand_group = [b_sets[i] for i in cand]
+        universe = frozenset().union(*ref_group, *cand_group)
+        cand_present = {fp: sum(fp in s for s in cand_group) for fp in universe}
+        ref_present = {fp: sum(fp in s for s in ref_group) for fp in universe}
+        for k in ks:
+            if any(cand_present[fp] >= k and ref_present[fp] <= j for fp in universe):
+                crossed[k] += 1
+    result["splits_evaluated"] = evaluated
+    result["rows"] = [{"k": k, "j": j, "splits": evaluated, "splits_crossed": crossed[k]}
+                      for k in ks]
+    return result
 
 
 def change_root_stability(comparisons, label):
@@ -684,7 +791,8 @@ def outcome_table(attempts):
     return out
 
 
-def analyze(sweep_result, comparisons, runs, category="tool"):
+def analyze(sweep_result, comparisons, runs, category="tool",
+            budget=ANALYSIS_SPLIT_BUDGET):
     attempts = sweep_result["attempts"]
     group = runs // 2
     ks = list(range(1, group + 1))
@@ -695,10 +803,13 @@ def analyze(sweep_result, comparisons, runs, category="tool"):
         "presence": presence(attempts),
         "order": order_analysis(attempts, category),
         "k_of_n": {
-            "reference_vs_reference": k_of_n(attempts, REFERENCE, REFERENCE, group, ks),
+            "reference_vs_reference":
+                k_of_n(attempts, REFERENCE, REFERENCE, group, ks, budget=budget),
             "reference_vs_reference_tool_only":
-                k_of_n(attempts, REFERENCE, REFERENCE, group, ks, category=category),
-            "reference_vs_candidate": k_of_n(attempts, REFERENCE, CANDIDATE, group, ks),
+                k_of_n(attempts, REFERENCE, REFERENCE, group, ks, category=category,
+                       budget=budget),
+            "reference_vs_candidate":
+                k_of_n(attempts, REFERENCE, CANDIDATE, group, ks, budget=budget),
         },
         "counted_changes": {
             label: change_root_stability(comparisons, label)

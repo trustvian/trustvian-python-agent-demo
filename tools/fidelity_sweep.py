@@ -87,6 +87,10 @@ def main(argv=None) -> int:
     parser.add_argument("--max-consecutive-failures", type=int, default=3)
     parser.add_argument("--results", required=True)
     parser.add_argument("--namespace", default=None)
+    parser.add_argument("--analysis-split-budget", type=int,
+                        default=fs.ANALYSIS_SPLIT_BUDGET,
+                        help="most k-of-N splits evaluated per analysis before it is "
+                             f"sampled instead (1..{fs.ANALYSIS_SPLIT_BUDGET_MAX})")
     args = parser.parse_args(argv)
 
     if not 2 <= args.runs <= 64:
@@ -101,6 +105,19 @@ def main(argv=None) -> int:
     except scenario_mod.ScenarioError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return runner.EXIT_USAGE
+
+    # The offline analysis's cost, decided before any model runs: a plan whose
+    # exhaustive analysis is out of reach is sampled, and says so, rather than
+    # discovered to be unbounded after two hours of model time.
+    try:
+        plan = fs.analysis_plan(args.runs, args.analysis_split_budget)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return runner.EXIT_USAGE
+    for name, entry in plan["analyses"].items():
+        print(f"k-of-N {name}: {entry['splits_total']:,} splits, {entry['mode']}"
+              + (f" ({entry['splits_evaluated']:,} evaluated)"
+                 if entry["mode"] == "sampled" else ""), flush=True)
 
     results = pathlib.Path(args.results)
     checkpoint = results.with_suffix(".partial.json")
@@ -134,6 +151,7 @@ def main(argv=None) -> int:
                         "schedule": "sequential, alternating reference/candidate",
                         "learning": "one fresh --behavioral-profile per repetition",
                         "gate_limits": dict(spec.gate),
+                        "analysis_plan": plan,
                         "workload": {side: {"command": list(getattr(spec, side).command),
                                             "env": dict(getattr(spec, side).env)}
                                      for side in fs.SIDES},
@@ -160,7 +178,8 @@ def main(argv=None) -> int:
                 document.update(
                     attempts=result["attempts"], aborted=result["aborted"],
                     comparisons=comparisons,
-                    analysis=fs.analyze(result, comparisons, args.runs))
+                    analysis=fs.analyze(result, comparisons, args.runs,
+                                        budget=args.analysis_split_budget))
                 fs.write(document, results)
                 if checkpoint.exists():
                     checkpoint.unlink()

@@ -152,8 +152,18 @@ def render(doc) -> str:
             add(f"- {title}: not evaluable — {data['error']}")
             continue
         cells = ", ".join(f"k={r['k']}: {r['splits_crossed']}/{r['splits']}" for r in data["rows"])
-        add(f"- {title} (groups of {data['group_size']}): splits with ≥1 repeatedly-added "
-            f"identity — {cells}")
+        if data.get("mode") == "sampled":
+            scope = (f"**sampled** — {data['splits_evaluated']:,} of {data['splits_total']:,} "
+                     f"splits, {data['sampling']}, seed `{data['seed']}`")
+        elif data.get("mode") == "exhaustive":
+            scope = f"exhaustive — all {data['splits_total']:,} splits"
+        else:
+            # A results file written before the bound existed. Every such file
+            # was exhaustive (the bound was added because larger N would not
+            # be), but it did not record that, so nothing is claimed here.
+            scope = "mode not recorded"
+        add(f"- {title} (groups of {data['group_size']}; {scope}): splits with "
+            f"≥1 repeatedly-added identity — {cells}")
     add("")
     return "\n".join(out)
 
