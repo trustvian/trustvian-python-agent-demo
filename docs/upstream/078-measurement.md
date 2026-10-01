@@ -196,3 +196,42 @@ Each sweep allocates a fresh candidate namespace, because `trustvian dev` keeps
 the learned baseline in a file per candidate and it persists across invocations.
 Without that, a sweep would start from whatever a previous sweep taught it — and
 the shared-versus-isolated comparison above would be meaningless.
+
+---
+
+## 2026-10-01: the re-run at tool fidelity
+
+Everything above is the 2026-09-27 sweep, and it stands as measured. This section
+adds the re-run that sweep asked for. Both re-run conditions held together: tool
+names via `execute_tool` spans, and eight tools over five tickets. Full results,
+method and raw data:
+[`docs/results/2026-10-01-stability-tool-fidelity.md`](../results/2026-10-01-stability-tool-fidelity.md).
+
+| | T = 0.7 | T = 1.3 |
+|---|---|---|
+| unchanged reference pairs failing a single-run gate at 0 | **48 / 90** | **59 / 90** |
+| positive control (`export_customer`, 0/10 → 10/10) | 100 / 100 | 100 / 100 |
+| per-identity rule offline, N = 5, j = 0, splits crossing at k = 1…5 | 6, 6, 6, 6, 0 of 252 | 1, 1, 1, 1, 1 of 252 |
+| `added_change_count` / `added_count` in every comparison | ½ | ½ |
+| fresh-scope critical-risk observations | 0 | 1 (one candidate run) |
+
+### What it changes for 078
+
+1. **The measurement now qualifies, and it found the phenomenon.** An unchanged
+   agent's identity set varies between isolated runs at tool fidelity. The k-of-N
+   machinery is no longer arguing against a zero rate.
+2. **It still does not justify a default `k` or `j`.**
+   - j = 0 across five reference runs does most of the work.
+   - No `k` removed every unchanged crossing at T = 1.3.
+   - The value that worked at T = 0.7 (`k = 5`) depended on the most variable
+     tool sitting at 4/10.
+   - `k` and `j` should stay required and caller-owned.
+3. **The repeated limit's unit needs deciding before the aggregation is built.**
+   - 078's per-identity counts move a tool and its HTTP child together, so
+     `max_repeated_added_behaviors` counts one act twice. That is ADR 0052's
+     single-pair defect, one level up.
+   - Pairwise `added_change_count` is not a stable cross-repetition unit to
+     aggregate instead.
+4. **Checks 5 and 6 can fire against a fresh scope**, once in forty runs here, so
+   "they report 0 by construction" is too strong. The advisory marker stays
+   right: a fresh scope's reading is not a learned one.

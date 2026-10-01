@@ -30,6 +30,7 @@ Each one is honest about what it proves.
 | `make scenario` | The same journey as a declarative scenario file, unattended, usable from CI | no | **now** |
 | PR workflow | A PR that changes agent behavior gets a Trustvian comment and a failing check | no | phase 3 |
 | `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead | yes (a simulated variant needs none) | **now** |
+| `make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>` | Task 078's re-run at tool fidelity: N isolated repetitions per side, every attempt recorded — [results](docs/results/2026-10-01-stability-tool-fidelity.md) | yes | **now** |
 | `make injection-bench` | A prompt injection hidden in data changes behavior, and Trustvian catches it without reading content | yes | phase 4 |
 
 The phased rows are specified in
@@ -535,6 +536,7 @@ the control plane open for the WebUI until Ctrl-C by design.
 make demo        # the full interactive demo, leaves the runtime up
 make scenario    # run a scenario file unattended
 make stability   # measure an unchanged agent against itself: RUNS=10 TEMPERATURE=0.7
+make fidelity-sweep  # the tool-fidelity re-run: RUNS TEMPERATURE TIMEOUT RESULTS, all required
 make smoke       # every guarantee, asserted non-interactively, no model
 make bootstrap   # build Trustvian and create the Python environments
 make clean       # remove every generated artifact, including the database
