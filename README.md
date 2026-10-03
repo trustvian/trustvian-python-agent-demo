@@ -29,7 +29,7 @@ Each one is honest about what it proves.
 | `make demo` | The live story: a local model drives an agent, the candidate gains a behavior, the gate fails | Ollama `gemma3:4b` | **now** |
 | `make scenario` | The same journey as a declarative scenario file, unattended, usable from CI | no | **now** |
 | PR workflow | A PR that changes agent behavior gets a Trustvian comment and a failing check | no | phase 3 |
-| `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead | yes (a simulated variant needs none) | **now** |
+| `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead — [results](docs/results/2026-09-27-stability.md) | yes (a simulated variant needs none) | **now** |
 | `make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>` | Task 078's re-run at tool fidelity: N isolated repetitions per side, every attempt recorded — [results](docs/results/2026-10-01-stability-tool-fidelity.md) | yes | **now** |
 | `make injection-bench` | A prompt injection hidden in data changes behavior, and Trustvian catches it without reading content | yes | phase 4 |
 
