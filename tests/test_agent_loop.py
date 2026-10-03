@@ -176,13 +176,62 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("crm_lookup", parsed["steps"])
 
 
-class DefaultsTest(unittest.TestCase):
-    def test_max_steps_is_bounded(self):
-        self.assertEqual(agent_main.MAX_STEPS, 8)
+def mock_customers():
+    """The customer ids the mock services actually serve.
 
-    def test_there_are_three_tickets_matching_the_mock_customers(self):
-        self.assertEqual([t["customer_id"] for t in agent_main.TICKETS],
-                         ["42", "43", "44"])
+    Read from mock_services rather than restated, so a ticket and a fixture
+    cannot drift apart while both look correct in isolation.
+    """
+    from mock_services.server import CUSTOMERS
+    return set(CUSTOMERS)
+
+
+class DefaultsTest(unittest.TestCase):
+    def test_max_steps_leaves_room_for_the_widest_ticket(self):
+        """The bound must exceed what an honest run needs, and still bound it.
+
+        A four-tool ticket plus finish is five steps; with both optional tools
+        and a refused action, nine. Stated as a relation to the toolset rather
+        than as a bare number, so widening the toolset again fails here with the
+        reason rather than passing with a bound that no longer fits.
+        """
+        widest_ticket = 4
+        optional_tools = 2
+        refusals_tolerated = 2
+        needed = widest_ticket + optional_tools + refusals_tolerated + 1
+        self.assertGreaterEqual(agent_main.MAX_STEPS, needed)
+        # Still a bound: a model that never finishes must fail visibly rather
+        # than run until something else stops it.
+        self.assertLessEqual(agent_main.MAX_STEPS, 2 * needed)
+
+    def test_every_ticket_names_a_customer_the_mock_services_hold(self):
+        """The real property: a ticket whose customer does not exist would make
+        crm_lookup 404 on every attempt, and the run would spend its whole step
+        budget on a refusal nobody planted deliberately.
+        """
+        self.assertEqual(len(agent_main.TICKETS), 5)
+        for ticket in agent_main.TICKETS:
+            with self.subTest(ticket=ticket["id"]):
+                self.assertIn(ticket["customer_id"], mock_customers(),
+                              f"{ticket['id']} names a customer the mock "
+                              f"services do not hold")
+
+    def test_the_tickets_make_the_tool_choice_real(self):
+        """Some tickets need two tools, some four.
+
+        Asserted on the ticket set's shape rather than on the model's behaviour:
+        if every ticket needed the same tools, the toolset would be wide and the
+        choice would not be, and the sweep would measure the prompt.
+        """
+        subjects = [t["subject"] for t in agent_main.TICKETS]
+        self.assertEqual(len(set(subjects)), len(subjects),
+                         "two tickets share a subject, so they pose one question")
+        # The prompt must not prescribe a sequence; that is what makes the
+        # choice the model's. Checked here because it is the ticket set's
+        # companion property and the two are easy to change apart.
+        message = agent_main.system_message("reference", agent_main.TICKETS[0])
+        self.assertIn("whichever", message)
+        self.assertNotIn("find relevant help documentation", message)
 
     def test_counting_session_starts_at_zero(self):
         self.assertEqual(agent_main.CountingSession().calls, 0)

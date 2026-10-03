@@ -1,0 +1,55 @@
+# Trustvian task 078's measurement, re-run at tool-name fidelity.
+#
+# The first sweep (docs/results/2026-09-27-stability.md) could not vary: three
+# tools every ticket needed, at transport fidelity. This one changes the two
+# things 078 named as re-run conditions, together:
+#
+#   - tool-name fidelity: harness/run_agent.py emits one GenAI execute_tool span
+#     per dispatch, so a behavior is the tool the model chose;
+#   - a toolset wider than one run visits: eight reference tools over five
+#     tickets, four optional on at least one ticket and one needed by none.
+#
+# Both sides run: the reference code against itself is the unchanged-workload
+# question, and the candidate code — which adds export_customer — is the
+# positive control that proves the measurement can see an added behavior at all.
+# Run by tools/fidelity_sweep.py, which gives every repetition its own
+# --behavioral-profile; `learning` here only describes that.
+version: "1"
+name: tool-fidelity-sweep
+description: >-
+  Unchanged-versus-unchanged and reference-versus-candidate at tool-name
+  fidelity, N isolated repetitions per side, for Trustvian task 078.
+
+runs: 10
+
+command: [opentelemetry-instrument, python, harness/run_agent.py]
+
+services: [mocks]
+requires: [ollama]
+
+instrumentation: existing
+learning: isolated
+
+evidence: summary
+
+reference:
+  candidate: tool-fidelity-reference
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "5"
+
+candidate:
+  candidate: tool-fidelity-candidate
+  env:
+    SUPPORT_AGENT_MODE: candidate
+    SUPPORT_AGENT_ROUNDS: "5"
+
+# The strictest limits, so every difference the server sees is reported. Both
+# behavior limits are stated: max_added_behaviors counts identities and
+# max_added_behavior_changes counts ADR 0052's changes, and the sweep records
+# both outcomes for every pair. Neither is a recommendation.
+gate:
+  max_added_behaviors: 0
+  max_block_decisions: 0
+  max_critical_risk_observations: 0
+  max_added_behavior_changes: 0

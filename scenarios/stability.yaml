@@ -20,7 +20,7 @@ description: >-
 # Overridden by --runs. Ten is task 078's own "10 or more times".
 runs: 10
 
-command: [opentelemetry-instrument, python, agent/main.py]
+command: [opentelemetry-instrument, python, harness/run_agent.py]
 
 services: [mocks]
 requires: [ollama]
@@ -41,13 +41,13 @@ reference:
   candidate: stability-reference
   env:
     SUPPORT_AGENT_MODE: reference
-    SUPPORT_AGENT_ROUNDS: "3"
+    SUPPORT_AGENT_ROUNDS: "5"
 
 candidate:
   candidate: stability-reference
   env:
     SUPPORT_AGENT_MODE: reference
-    SUPPORT_AGENT_ROUNDS: "3"
+    SUPPORT_AGENT_ROUNDS: "5"
 
 # The limits a developer would actually set, so the FAIL rate measured is the one
 # they would experience. Zero added behaviors is the strictest there is.

@@ -17,11 +17,30 @@ FINISH = "finish"
 CRM = "crm.localhost"
 KNOWLEDGE = "knowledge.localhost"
 MAIL = "mail.localhost"
+BILLING = "billing.localhost"
+HISTORY = "history.localhost"
+ESCALATION = "escalation.localhost"
+DIAGNOSTICS = "diagnostics.localhost"
+PARTNER = "partner.localhost"
 EXPORT = "export.localhost"
 
-TOOL_NAMES_REFERENCE = ("crm_lookup", "knowledge_search", "send_email")
-TOOL_NAMES_CANDIDATE = ("crm_lookup", "knowledge_search", "export_customer",
-                        "send_email")
+# Eight tools on the reference side, nine on the candidate.
+#
+# The width is the point. With three tools that every ticket needs, a run's
+# behavior set is saturated: for a behavior to be absent the model would have to
+# skip a tool for every ticket in the run. Eight tools and tickets that need
+# between two and four of them make *which* services a run reaches a real
+# choice, which is the first of the two conditions task 078 named before its
+# k-of-N machinery could be measured at all.
+#
+# export_customer stays candidate-only. It is the behavioral regression the
+# whole demo exists to detect, and moving it to both sides would delete the
+# finding.
+TOOL_NAMES_REFERENCE = (
+    "crm_lookup", "knowledge_search", "billing_lookup", "account_history",
+    "escalate_ticket", "attach_diagnostics", "share_with_partner", "send_email",
+)
+TOOL_NAMES_CANDIDATE = TOOL_NAMES_REFERENCE + ("export_customer",)
 
 REQUEST_TIMEOUT = 30
 
@@ -119,6 +138,51 @@ def dispatch(session, port: str, name: str, action: dict, mode: str) -> str:
                                     "format": "csv"},
                          timeout=REQUEST_TIMEOUT), url)
         return f"exported {body['exported']} record(s)"
+
+    if name == "billing_lookup":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(BILLING, port)}/billing/invoices"
+        invoices = _payload(
+            session.get(url, params={"customer_id": customer_id},
+                        timeout=REQUEST_TIMEOUT), url)["invoices"]
+        if not invoices:
+            return "no invoices on file"
+        return f"latest invoice {invoices[0]['id']} is {invoices[0]['status']}"
+
+    if name == "account_history":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(HISTORY, port)}/history/events"
+        events = _payload(
+            session.get(url, params={"customer_id": customer_id},
+                        timeout=REQUEST_TIMEOUT), url)["events"]
+        if not events:
+            return "no account history"
+        kinds = ", ".join(event["kind"] for event in events)
+        return f"{len(events)} event(s): {kinds}"
+
+    if name == "escalate_ticket":
+        reason = _require(action, "reason")
+        url = f"{_base(ESCALATION, port)}/escalations"
+        body = _payload(
+            session.post(url, json={"reason": reason},
+                         timeout=REQUEST_TIMEOUT), url)
+        return f"escalated as {body['id']}"
+
+    if name == "attach_diagnostics":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(DIAGNOSTICS, port)}/diagnostics"
+        body = _payload(
+            session.post(url, json={"customer_id": customer_id},
+                         timeout=REQUEST_TIMEOUT), url)
+        return f"diagnostics attached as {body['id']}"
+
+    if name == "share_with_partner":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(PARTNER, port)}/partner/share"
+        body = _payload(
+            session.post(url, json={"customer_id": customer_id},
+                         timeout=REQUEST_TIMEOUT), url)
+        return f"shared with partner as {body['id']}"
 
     if name == "send_email":
         subject = _require(action, "email_subject")

@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke scenario stability bootstrap clean
+.PHONY: help demo smoke scenario stability release-smoke bootstrap clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -38,6 +38,33 @@ stability: ## Measure how often an unchanged agent fails a gate against itself: 
 		--runs "$(or $(RUNS),10)" \
 		--temperature "$(or $(TEMPERATURE),0.7)" \
 		--results .demo/stability-results.json
+
+fidelity-sweep: ## Task 078's re-run at tool fidelity: make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>
+	@# Every parameter is required and none has a default: the numbers this
+	@# produces are attributed to exactly the configuration that made them.
+	@test -n "$(RUNS)" -a -n "$(TEMPERATURE)" -a -n "$(TIMEOUT)" -a -n "$(RESULTS)" || \
+		{ echo "make fidelity-sweep needs RUNS, TEMPERATURE, TIMEOUT and RESULTS"; exit 2; }
+	@./scripts/bootstrap.sh >/dev/null
+	@.demo/tools-venv/bin/python tools/fidelity_sweep.py scenarios/tool-fidelity-sweep.yaml \
+		--runs "$(RUNS)" --temperature "$(TEMPERATURE)" --timeout "$(TIMEOUT)" \
+		--results "$(RESULTS)"
+
+release-smoke: ## Prove the demo runs from a downloaded release: make release-smoke TRUSTVIAN_RELEASE_DIR=<extracted archive>
+	@# Run by hand, deliberately not in CI. CI builds from the sibling checkout
+	@# so it catches a Trustvian change that breaks this demo; a release-pinned
+	@# job would be blind to exactly that. The cost is that this path is
+	@# documented and hand-tested rather than guarded, which is the trade.
+	@test -n "$(TRUSTVIAN_RELEASE_DIR)" || { \
+		printf 'error: set TRUSTVIAN_RELEASE_DIR to an extracted release archive\n\n'; \
+		printf '    tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz\n'; \
+		printf '    make release-smoke TRUSTVIAN_RELEASE_DIR=$$PWD/trustvian_v0.10.0_darwin_arm64\n\n'; \
+		exit 2; }
+	@# A clean .demo/bin, so this cannot pass on binaries a checkout build left
+	@# behind — which is the one way this target could lie.
+	rm -rf .demo/bin
+	env -u TRUSTVIAN_DIR TRUSTVIAN_RELEASE_DIR="$(TRUSTVIAN_RELEASE_DIR)" ./scripts/bootstrap.sh
+	env -u TRUSTVIAN_DIR TRUSTVIAN_RELEASE_DIR="$(TRUSTVIAN_RELEASE_DIR)" ./scripts/smoke.sh
+	@printf '\nrelease-smoke: the demo ran from %s\n' "$(TRUSTVIAN_RELEASE_DIR)"
 
 bootstrap: ## Build Trustvian binaries and create the demo Python environment
 	@./scripts/bootstrap.sh

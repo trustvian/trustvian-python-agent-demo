@@ -11,6 +11,32 @@
 set -euo pipefail
 
 DEMO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Two sources for the three binaries, and exactly one may be chosen.
+#
+# TRUSTVIAN_DIR is a sibling checkout and stays the default: this demo exists to
+# catch a Trustvian change that breaks it, and pinning it to a published release
+# would make it blind to precisely that.
+#
+# TRUSTVIAN_RELEASE_DIR is an extracted release archive. Trustvian's #114 ships
+# trustvian-local and trustvian-collector beside trustvian on macOS and Linux, so
+# a reader of docs/results/ can reproduce a published number without a Go
+# toolchain.
+#
+# Setting both is an error rather than a precedence rule nobody remembers. Two
+# sources of the same three binaries is the ambiguity that produces "which
+# Trustvian did I just measure?", and this repository's whole output is a number
+# attributed to a commit.
+TRUSTVIAN_RELEASE_DIR="${TRUSTVIAN_RELEASE_DIR:-}"
+if [ -n "$TRUSTVIAN_RELEASE_DIR" ] && [ -n "${TRUSTVIAN_DIR:-}" ]; then
+    printf '\nerror: %s\n' "both TRUSTVIAN_DIR and TRUSTVIAN_RELEASE_DIR are set.
+
+       TRUSTVIAN_DIR          $TRUSTVIAN_DIR
+       TRUSTVIAN_RELEASE_DIR  $TRUSTVIAN_RELEASE_DIR
+
+       Pick one. Unset the other rather than relying on a precedence rule:
+       a measurement has to be attributable to one Trustvian." >&2
+    exit 1
+fi
 TRUSTVIAN_DIR="${TRUSTVIAN_DIR:-$(cd "$DEMO_ROOT/.." && pwd)/trustvian}"
 BIN_DIR="$DEMO_ROOT/.demo/bin"
 VENV_DIR="$DEMO_ROOT/.demo/venv"
@@ -48,6 +74,52 @@ log "crm/knowledge/mail/export/ollama .localhost all resolve to loopback"
 # 2. The sibling Trustvian checkout
 # ---------------------------------------------------------------------
 echo "Locating Trustvian"
+
+if [ -n "$TRUSTVIAN_RELEASE_DIR" ]; then
+    # The release path: three executables, no source, nothing built.
+    #
+    # The checkout path greps processor/config.go to prove the Collector has an
+    # evaluation sink. There is no source to grep here, and the replacement is an
+    # argument rather than a check: no release archive carried the two helpers
+    # before Trustvian's #114, and the evaluation sink landed long before that,
+    # so a release directory holding all three is necessarily new enough.
+    #
+    # That argument holds only while #114 is the first release to ship them. If a
+    # later release ever drops one, this needs a version floor instead.
+    for helper in trustvian trustvian-local trustvian-collector; do
+        [ -x "$TRUSTVIAN_RELEASE_DIR/$helper" ] || fail \
+"no $helper in $TRUSTVIAN_RELEASE_DIR
+
+       TRUSTVIAN_RELEASE_DIR must name the *extracted* archive directory, the
+       one holding the three binaries — not the .tar.gz and not its parent:
+
+           tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz
+           TRUSTVIAN_RELEASE_DIR=\$PWD/trustvian_v0.10.0_darwin_arm64 make bootstrap
+
+       Windows archives carry only trustvian: dev is unsupported there."
+    done
+    log "found release $TRUSTVIAN_RELEASE_DIR"
+
+    # The stamp is what the binary reports, so a different release rebuilds and
+    # the same one does not — the same contract the checkout's commit stamp has.
+    release_stamp="release:$("$TRUSTVIAN_RELEASE_DIR/trustvian" version 2>/dev/null | head -1)"
+    STAMP_FILE="$BIN_DIR/.build-stamp"
+    if [ "$release_stamp" = "$(cat "$STAMP_FILE" 2>/dev/null || true)" ] \
+       && [ -x "$BIN_DIR/trustvian" ]; then
+        echo "Trustvian binaries are current"
+    else
+        echo "Copying Trustvian binaries from the release"
+        mkdir -p "$BIN_DIR"
+        rm -f "$STAMP_FILE"
+        # Copied, not symlinked: a symlink breaks when someone moves or deletes
+        # the download, and it would break mid-sweep rather than at bootstrap.
+        for helper in trustvian trustvian-local trustvian-collector; do
+            cp "$TRUSTVIAN_RELEASE_DIR/$helper" "$BIN_DIR/$helper"
+            log "$helper"
+        done
+        printf '%s\n' "$release_stamp" >"$STAMP_FILE"
+    fi
+else
 
 [ -d "$TRUSTVIAN_DIR" ] || fail "no Trustvian checkout at $TRUSTVIAN_DIR
 
@@ -137,6 +209,7 @@ else
     # binaries that are not there.
     printf '%s\n' "$WANT_STAMP" >"$STAMP_FILE"
 fi
+fi  # release-or-checkout
 
 # ---------------------------------------------------------------------
 # 4. The demo-managed Python environment

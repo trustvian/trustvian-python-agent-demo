@@ -57,7 +57,7 @@ dev_agent_run() {
     SUPPORT_AGENT_SUMMARY="$RUNTIME_DIR/agent-$mode-summary.json" \
     OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
         dev_run "$run_id" "$candidate" "$RUNTIME_DIR/dev-$mode.log" \
-            "$VENV_DIR/bin/python" "$DEMO_ROOT/agent/main.py"
+            "$VENV_DIR/bin/python" "$DEMO_ROOT/harness/run_agent.py"
 }
 
 # The hierarchy exists before any telemetry does, and dev creates it — project,

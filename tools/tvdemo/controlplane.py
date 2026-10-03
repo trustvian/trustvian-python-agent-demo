@@ -59,8 +59,12 @@ class ControlPlane:
             "--max-block-decisions", str(limits["max_block_decisions"]),
             "--max-critical-risk-observations",
             str(limits["max_critical_risk_observations"]),
-            "--json",
         ]
+        # Optional on the server: sent only when stated, never as a default.
+        if "max_added_behavior_changes" in limits:
+            args += ["--max-added-behavior-changes",
+                     str(limits["max_added_behavior_changes"])]
+        args.append("--json")
         completed = self._run(args, allow=(0, 1))
         return completed.returncode, json.loads(completed.stdout)
 

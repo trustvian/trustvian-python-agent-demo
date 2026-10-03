@@ -44,6 +44,26 @@ class PlannerError(Exception):
     """The model could not be asked, or did not answer usably."""
 
 
+class PlannerUnusableReply(PlannerError):
+    """The model failed to produce an answer, and another sample may succeed.
+
+    Distinct from PlannerError because the two need opposite handling. A refused
+    connection, a DNS failure or a timeout is not something another sample fixes,
+    and retrying it turns one clear error into several confusing ones. A server
+    that answered and said it could not generate is the opposite: the prompt is
+    fine, the sample was not, and the fix is to ask again.
+
+    Measured rather than assumed. Ollama aborts generation with
+
+        500 {"error":"prediction aborted, token repeat limit reached"}
+
+    when the model falls into a repetition loop, which gemma3:4b does at
+    temperature 0.7 roughly once in twelve calls once a ticket's conversation
+    grows past ~1000 tokens. Treating that as fatal ended a 40-run stability
+    sweep at repetition 7 of 20, with an agent that was working correctly.
+    """
+
+
 def default_url() -> str:
     """The local chat endpoint.
 
@@ -78,6 +98,22 @@ def temperature_from_environment() -> float:
     if value < 0:
         raise PlannerError(f"OLLAMA_TEMPERATURE={raw!r} is negative")
     return value
+
+
+def _server_error(response) -> str:
+    """Ollama's own error text, when it sent one.
+
+    Bounded and not logged anywhere: this reaches a developer's terminal through
+    an exception message, and the field is Ollama's rather than the model's, so it
+    carries no completion. Truncated because a server is free to send anything.
+    """
+    if response is None:
+        return ""
+    try:
+        message = response.json().get("error", "")
+    except ValueError:
+        message = response.text
+    return str(message)[:200]
 
 
 def action_schema(tool_names) -> dict:
@@ -117,6 +153,19 @@ def action_schema(tool_names) -> dict:
 class Planner:
     """One model, one endpoint, one action per call."""
 
+    # Attempts allowed when the server answers but reports it could not
+    # generate. Separate from max_retries, and larger, because the two failures
+    # have different rates.
+    #
+    # A malformed reply is the model misunderstanding the schema, and a
+    # correction usually lands on the first retry. A repetition-loop abort is
+    # sampling luck at ~8% per call on a long conversation, so three attempts
+    # leave 0.05% per call — which over the ~500 calls of a two-configuration
+    # sweep is a 23% chance of losing a repetition. Five attempts put that at
+    # 0.16%, which is small enough that a failure means something real rather
+    # than arithmetic catching up.
+    MAX_GENERATION_ATTEMPTS = 5
+
     def __init__(self, session, url, model=DEFAULT_MODEL, max_retries=2,
                  temperature=DEFAULT_TEMPERATURE):
         self.session = session
@@ -145,7 +194,17 @@ class Planner:
         problem = "no attempt was made"
 
         for _ in range(self.max_retries + 1):
-            content = self._chat(attempt, schema)
+            # A generation failure is not a malformed reply and costs no
+            # correction message: the prompt is unchanged and only the sample
+            # was bad, so this retries the identical request. It does not consume
+            # an outer attempt either — an outer attempt is for teaching the
+            # model something, and there is nothing to teach here.
+            try:
+                content = self._chat_with_generation_retry(attempt, schema)
+            except PlannerUnusableReply as exc:
+                raise PlannerError(
+                    f"the model could not generate a reply after "
+                    f"{self.MAX_GENERATION_ATTEMPTS} attempts: {exc}") from exc
             try:
                 action = json.loads(content)
             except (ValueError, TypeError):
@@ -182,6 +241,21 @@ class Planner:
             f"the model did not return a usable action after "
             f"{self.max_retries + 1} attempts: {problem}")
 
+    def _chat_with_generation_retry(self, messages, schema) -> str:
+        """One reply, retrying only a server-side failure to generate.
+
+        Bounded and unconditional in its delay: there is no backoff, because the
+        cause is sampling rather than load, and a local model server under no
+        contention gains nothing from waiting.
+        """
+        problem = "no attempt was made"
+        for _ in range(self.MAX_GENERATION_ATTEMPTS):
+            try:
+                return self._chat(messages, schema)
+            except PlannerUnusableReply as exc:
+                problem = str(exc)
+        raise PlannerUnusableReply(problem)
+
     def _chat(self, messages, schema) -> str:
         """One request. An HTTP failure is fatal, not something to retry here.
 
@@ -202,6 +276,16 @@ class Planner:
             response = self.session.post(
                 self.url, json=payload, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            # 5xx means the server was reached and could not answer. That is a
+            # different fact from "the server is not there", and only one of the
+            # two is worth another sample.
+            status = exc.response.status_code if exc.response is not None else 0
+            if 500 <= status < 600:
+                raise PlannerUnusableReply(
+                    f"Ollama could not generate a reply: {status} "
+                    f"{_server_error(exc.response)}") from exc
+            raise PlannerError(f"Ollama request failed: {exc}") from exc
         except requests.exceptions.RequestException as exc:
             raise PlannerError(f"Ollama request failed: {exc}") from exc
 
