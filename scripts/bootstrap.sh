@@ -49,11 +49,15 @@ fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------
 echo "Checking prerequisites"
 
-command -v go      >/dev/null 2>&1 || fail "go is not on PATH; install Go 1.27 or newer"
+# Go builds the checkout; a release directory needs no toolchain at all.
+if [ -z "$TRUSTVIAN_RELEASE_DIR" ]; then
+    command -v go  >/dev/null 2>&1 || fail "go is not on PATH; install Go 1.27 or newer"
+    log "go"
+fi
 command -v python3 >/dev/null 2>&1 || fail "python3 is not on PATH; install it with 'brew install python3' or from https://www.python.org/downloads/"
 command -v jq      >/dev/null 2>&1 || fail "jq is not on PATH; install it with 'brew install jq' or 'apt-get install jq'"
 command -v curl    >/dev/null 2>&1 || fail "curl is not on PATH; install it with 'brew install curl' or your OS package manager"
-log "go, python3, jq, curl"
+log "python3, jq, curl"
 
 # Resolution is checked here rather than discovered as a confusing
 # NameResolutionError inside the agent, thirty seconds into a demo.
