@@ -14,3 +14,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Results and logs of the Compose stack (compose/README.md)
+compose/out/
