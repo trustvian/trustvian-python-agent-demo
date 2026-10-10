@@ -1,0 +1,15 @@
+# Applies to builds of compose/Dockerfile (BuildKit reads the ignore file
+# named after the Dockerfile). Everything the demo generates stays out: the
+# image runs its own `make bootstrap`.
+.demo/
+.runtime/
+.trustvian/
+.git/
+.github/
+.superpowers/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+compose/out/

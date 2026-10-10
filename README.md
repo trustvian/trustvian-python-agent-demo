@@ -443,7 +443,9 @@ publishes.
   The reply itself is never printed: it is a model completion, and no completion
   appears in anything this repository publishes.
 
-No Docker. No API keys. No `sudo`. No external service but Ollama.
+No Docker: the demo itself never needs it, and [`compose/`](compose/README.md)
+is an optional wrapper for a machine that has Docker and nothing else. No API
+keys. No `sudo`. No external service but Ollama.
 
 Three gitignored directories in this repository hold what it generates —
 `.demo/` (binaries and virtualenvs), `.runtime/` (logs and per-run scratch) and

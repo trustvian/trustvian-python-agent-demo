@@ -1,0 +1,88 @@
+# The Python agent demo, as a Compose stack.
+#
+# One service does the work: `demo` holds Trustvian v0.10.0 (the release
+# archive, and the collector from its signed image, pinned in Dockerfile), the
+# demo and everything `make bootstrap` sets up, and runs the repository's own
+# entry points unchanged. The five *.localhost names the demo addresses its mock
+# services and Ollama by are supplied here (extra_hosts) instead of by the
+# operating system's resolver, which is the one thing a container lacks.
+#
+# Run from this directory:
+#
+#   docker compose build demo                                     # named: it is behind a profile
+#   docker compose run --rm demo smoke                            # no model
+#   docker compose run --rm --service-ports demo scenario         # Ollama on the host
+#   docker compose run --rm --service-ports demo web              # browse the last result
+#
+# Ollama: the default is the one on your host, reached as ollama.localhost ->
+# host-gateway. On Linux it must listen on all interfaces
+# (OLLAMA_HOST=0.0.0.0). For an Ollama inside Compose:
+#
+#   OLLAMA_LOCALHOST=172.28.0.10 docker compose --profile ollama up -d ollama
+#   docker compose exec ollama ollama pull gemma3:4b
+#   OLLAMA_LOCALHOST=172.28.0.10 docker compose run --rm demo scenario
+#
+# (a fixed address, because ollama.localhost has to be an /etc/hosts entry —
+# the demo probes that exact hostname and port.)
+
+name: trustvian-python-agent-demo
+
+services:
+  demo:
+    build:
+      context: ..
+      dockerfile: compose/Dockerfile
+      # bootstrap.sh checks that these resolve before building anything, and
+      # it runs at build time here.
+      extra_hosts:
+        - "crm.localhost:127.0.0.1"
+        - "knowledge.localhost:127.0.0.1"
+        - "mail.localhost:127.0.0.1"
+        - "export.localhost:127.0.0.1"
+        - "ollama.localhost:127.0.0.1"
+    # One-shot; never started by a bare `docker compose up`.
+    profiles: ["demo"]
+    extra_hosts:
+      # The mock services run inside this container, on a port the scripts
+      # pick; the four names must point at its own loopback.
+      - "crm.localhost:127.0.0.1"
+      - "knowledge.localhost:127.0.0.1"
+      - "mail.localhost:127.0.0.1"
+      - "export.localhost:127.0.0.1"
+      # Ollama is outside: the host by default, or the `ollama` service.
+      - "ollama.localhost:${OLLAMA_LOCALHOST:-host-gateway}"
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
+      # 1 keeps the control plane up after `scenario` so the WebUI can be
+      # opened; needs `run --service-ports`.
+      TRUSTVIAN_WEB: ${TRUSTVIAN_WEB:-0}
+      # yes streams the agent's transcript to the terminal as it happens.
+      AGENT_STREAM: ${AGENT_STREAM:-yes}
+      TEMPERATURE: ${TEMPERATURE:-0.7}
+    volumes:
+      - ./out:/out
+    ports:
+      # Only published with `docker compose run --service-ports`.
+      - "127.0.0.1:${TRUSTVIAN_WEB_PORT:-8080}:8080"
+    networks:
+      - demo
+    restart: "no"
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      demo:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+
+networks:
+  demo:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  ollama-models:
