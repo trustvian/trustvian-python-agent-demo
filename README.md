@@ -112,11 +112,25 @@ What this changes about what is detected:
   `GET crm.localhost/crm/customers/42` are still one *transport* behavior, but
   `export_customer` and `crm_lookup` are two tool behaviors.
 
-One caveat, measured rather than assumed: the fidelity indicator that says
-*which* of the two a behavior is does not currently reach the control plane
-through the Collector — see
-[`docs/upstream/081-fidelity-ingest-gap.md`](docs/upstream/081-fidelity-ingest-gap.md).
-The behavior *names* are correct; only the label qualifying them is missing.
+**The model call is named the same way.** The harness also wraps the planner's
+session, so each request to Ollama is a GenAI `chat` span carrying the model
+name, the provider and the usage counts Ollama reports. Trustvian reads it as a
+model call — category `external`, layer `model` — and the HTTP request beneath
+it stays visible too:
+
+```text
+external · gemma3:4b → ollama    a behavior — the model call, layer model, with tokens
+POST -> ollama.localhost         a behavior — the same request, at transport
+```
+
+Without the `chat` span the model call is only `POST -> ollama.localhost`:
+Trustvian reads no tokens, counts no model layer, and since Trustvian task 081's
+decision D9 a `max_llm_calls_per_run` limit is `deferred` rather than evaluated.
+
+The fidelity indicator that says *which* of the two a behavior is reaches the
+control plane since Trustvian task 081. Before it, it did not — see
+[`docs/upstream/081-fidelity-ingest-gap.md`](docs/upstream/081-fidelity-ingest-gap.md),
+kept as the record of how that was found.
 
 ## The agent
 
@@ -187,7 +201,20 @@ created inside `dispatch` by the `requests` instrumentation, so a wrapper around
 appear.
 
 It emits exactly two attributes, `gen_ai.operation.name` and
-`gen_ai.tool.name`. No arguments, no results, no description. `make smoke`
+`gen_ai.tool.name`. No arguments, no results, no description.
+
+The harness wraps the planner the same way. `Planner.__init__` is rebound so the
+planner's session is a pass-through whose `post` opens one CLIENT span named
+`chat {model}`, the parent of the `requests` HTTP span. Its attributes are
+exactly `gen_ai.operation.name=chat`, `gen_ai.provider.name=ollama`,
+`gen_ai.request.model`, `server.address`, `server.port`, and — only when
+Ollama's reply states them — `gen_ai.response.model`,
+`gen_ai.usage.input_tokens` (from `prompt_eval_count`) and
+`gen_ai.usage.output_tokens` (from `eval_count`). An absent count is left unset,
+never 0. No messages, prompt, completion or system instructions. A failed call
+sets an error status with the fixed description `model call failed`, never the
+exception text or Ollama's error body. `tests/test_model_call_span.py` asserts
+the exact attribute set. `make smoke`
 asserts the harness imports no Trustvian package and that nothing the
 application runs imports the harness, because a file-level isolation the process
 violated would be true of the files and false of the thing being measured.
@@ -592,7 +619,8 @@ existing evidence rather than to accumulate it across runs.
 ## What Trustvian actually sees
 
 ```text
-POST -> ollama.localhost     the model call itself — model-driven runs only
+external · gemma3:4b -> ollama   the model call, named by the harness — model-driven runs only
+POST -> ollama.localhost     the same model call's HTTP request — model-driven runs only
 GET  -> crm.localhost
 GET  -> knowledge.localhost
 POST -> mail.localhost
@@ -614,6 +642,11 @@ make smoke (fixture)         27 / 36                   3 / 4             1
   fixture's counts are asserted exactly by `make smoke`; the model's are
   reported.
 ```
+
+The 2026-09-27 model counts predate the harness's `execute_tool` and `chat`
+spans, each of which adds a behavior beside the HTTP one it wraps. The model
+call is therefore counted under two targets: the `chat` span's `ollama` and the
+HTTP request's `ollama.localhost`, with the same number of calls per run.
 
 ## Application dependency vs runtime instrumentation
 

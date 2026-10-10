@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Runs the support agent with tool calls instrumented, without touching it.
+"""Runs the support agent with tool and model calls instrumented, without touching it.
 
 This is the harness, not the application. It stands in for what a framework's
-zero-code instrumentation would have provided: the agent dispatches tools through
-one function, and this wraps that function so each dispatch becomes an
-OpenTelemetry GenAI ``execute_tool`` span. Trustvian then reads the tool's own
-name instead of the transport underneath it.
+zero-code instrumentation would have provided:
+
+  - the agent dispatches tools through one function, and this wraps that
+    function so each dispatch becomes an OpenTelemetry GenAI ``execute_tool``
+    span. Trustvian then reads the tool's own name instead of the transport
+    underneath it;
+  - the planner sends each model request through the session it is given, and
+    this wraps that session so each request becomes a GenAI ``chat`` span. An
+    LLM client library's instrumentation would emit the same span; the planner
+    uses plain ``requests``, so without this Trustvian sees only
+    ``POST → ollama.localhost`` at transport fidelity — no model layer, no
+    tokens.
 
 Why it exists as a third directory, beside ``agent/`` and ``tools/``:
 
@@ -31,6 +39,7 @@ from __future__ import annotations
 import functools
 import pathlib
 import sys
+from urllib.parse import urlsplit
 
 # The repository root, so `from agent import ...` resolves when this file is run
 # as a script. Inserted rather than appended: a same-named module elsewhere on
@@ -38,8 +47,9 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from opentelemetry import trace  # noqa: E402
-from opentelemetry.trace import Status, StatusCode  # noqa: E402
+from opentelemetry.trace import SpanKind, Status, StatusCode  # noqa: E402
 
+from agent import planner as planner_mod  # noqa: E402
 from agent import tools  # noqa: E402
 
 # The two attributes, and only these two.
@@ -115,19 +125,154 @@ def instrument_dispatch(dispatch):
 
 
 def install() -> None:
-    """Rebind agent.tools.dispatch to its instrumented form.
+    """Rebind agent.tools.dispatch and Planner.__init__ to instrumented forms.
 
     Idempotent: a second call is a no-op rather than a second layer of spans,
     because a doubly-wrapped dispatch would report every tool call twice and read
-    as an actor behaving strangely.
+    as an actor behaving strangely. The same holds for the model call.
 
     Rebinding the module attribute is sufficient because agent/main.py calls
-    `tools.dispatch(...)` — a module lookup at call time — so nothing in the
-    application has to cooperate, and nothing in it is edited.
+    `tools.dispatch(...)` — a module lookup at call time — and constructs its
+    planner after this runs, so nothing in the application has to cooperate,
+    and nothing in it is edited.
     """
-    if getattr(tools.dispatch, "__wrapped__", None) is not None:
-        return
-    tools.dispatch = instrument_dispatch(tools.dispatch)
+    if getattr(tools.dispatch, "__wrapped__", None) is None:
+        tools.dispatch = instrument_dispatch(tools.dispatch)
+    if getattr(planner_mod.Planner.__init__, "__wrapped__", None) is None:
+        planner_mod.Planner.__init__ = instrument_planner(planner_mod.Planner.__init__)
+
+
+# The model call's attributes, and only these.
+#
+# OpenTelemetry's GenAI client-span convention, names only. Trustvian's
+# internal/semconv reads gen_ai.operation.name=chat as a model call (category
+# external, layer model), gen_ai.request.model as its identity and
+# gen_ai.provider.name as its target; task 087 reads the two usage counts.
+# server.address and server.port name the endpoint, as the convention asks of a
+# client span. Nothing that carries content is set: no gen_ai.input.messages,
+# gen_ai.output.messages, gen_ai.system_instructions, prompt, completion or tool
+# argument. gen_ai.agent.name stays absent for the reason given above.
+GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
+GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+SERVER_ADDRESS = "server.address"
+SERVER_PORT = "server.port"
+CHAT = "chat"
+OLLAMA = "ollama"
+
+# Ollama's response fields for the two usage counts. A reply is not guaranteed
+# to carry either — an error body carries neither — and an absent count is left
+# unset, never reported as 0: "not stated" and "zero tokens" are different facts
+# to Trustvian's task 087.
+_USAGE_FIELDS = (
+    ("prompt_eval_count", GEN_AI_USAGE_INPUT_TOKENS),
+    ("eval_count", GEN_AI_USAGE_OUTPUT_TOKENS),
+)
+
+# The status description on a failed model call. Fixed, for the same reason the
+# tool span records no exception: an exception message or Ollama's error body is
+# text the span must not carry.
+MODEL_CALL_FAILED = "model call failed"
+
+_model_tracer = trace.get_tracer("trustvian-demo.harness.model")
+
+
+def _request_attributes(url, payload):
+    """The attributes known before the request is sent."""
+    attributes = {
+        GEN_AI_OPERATION_NAME: CHAT,
+        GEN_AI_PROVIDER_NAME: OLLAMA,
+    }
+    model = payload.get("model") if isinstance(payload, dict) else None
+    if isinstance(model, str) and model:
+        attributes[GEN_AI_REQUEST_MODEL] = model
+    parts = urlsplit(url)
+    if parts.hostname:
+        attributes[SERVER_ADDRESS] = parts.hostname
+    if parts.port is not None:
+        attributes[SERVER_PORT] = parts.port
+    return attributes
+
+
+def _response_attributes(response):
+    """The response model and usage counts, each only when the reply states it.
+
+    Reads three named fields of Ollama's reply and nothing else — never
+    message.content. A reply that is not a JSON object yields nothing.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    attributes = {}
+    model = body.get("model")
+    if isinstance(model, str) and model:
+        attributes[GEN_AI_RESPONSE_MODEL] = model
+    for field, attribute in _USAGE_FIELDS:
+        value = body.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            attributes[attribute] = value
+    return attributes
+
+
+class ModelCallSession:
+    """The planner's session, with each post a GenAI ``chat`` CLIENT span.
+
+    A strict pass-through, like instrument_dispatch: the post reaches the real
+    session with the same arguments, its response is returned unchanged, and an
+    exception propagates as the same object. Everything else is delegated, so
+    the application's own CountingSession still counts every request.
+
+    The span is the *parent* of the HTTP span the requests instrumentation
+    creates inside session.post, so both exist: the model call, and the
+    transport request beneath it.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def post(self, url, *args, **kwargs):
+        attributes = _request_attributes(url, kwargs.get("json"))
+        model = attributes.get(GEN_AI_REQUEST_MODEL, "")
+        with _model_tracer.start_as_current_span(
+            f"{CHAT} {model}".rstrip(),
+            kind=SpanKind.CLIENT,
+            record_exception=False,
+            set_status_on_exception=False,
+            attributes=attributes,
+        ) as span:
+            try:
+                response = self._session.post(url, *args, **kwargs)
+            except BaseException:
+                span.set_status(Status(StatusCode.ERROR, MODEL_CALL_FAILED))
+                raise
+            span.set_attributes(_response_attributes(response))
+            if response.status_code >= 400:
+                span.set_status(Status(StatusCode.ERROR, MODEL_CALL_FAILED))
+            return response
+
+
+def instrument_planner(init):
+    """Wrap Planner.__init__ so the planner's session is a ModelCallSession.
+
+    Only the planner's view of the session changes. The object the application
+    created is the one every request still goes through, and the tool dispatch
+    path, which receives that object directly, is untouched.
+    """
+    @functools.wraps(init)
+    def wrapper(self, session, *args, **kwargs):
+        if not isinstance(session, ModelCallSession):
+            session = ModelCallSession(session)
+        init(self, session, *args, **kwargs)
+
+    return wrapper
 
 
 install()
