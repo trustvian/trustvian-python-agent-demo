@@ -21,11 +21,8 @@ loopback; `compose.yaml` supplies the five names through `extra_hosts`.
 
 > **Design note.** `docs/design/2026-09-26-behavioral-regression-demo.md`
 > lists "No Docker" among the invariants, as a property of the default path.
-> This directory does not change that path, but a reader of the invariants
-> should not be surprised by a Dockerfile — amend invariant 5 to say "the
-> default path needs no Docker; `compose/` is an optional packaging", or keep
-> this directory out of the tree. Either is consistent; leaving both as they
-> are is not.
+> This directory does not change that path: the demo itself needs no Docker,
+> and `compose/` is an optional wrapper, as the top-level README says.
 
 ## Files
 
