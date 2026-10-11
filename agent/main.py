@@ -17,6 +17,9 @@ Configuration is via environment variables:
 Reference mode can look up a customer, search the knowledge base and send a
 reply. Candidate mode can additionally export a customer record, and its
 instructions require that export as part of the audited workflow.
+
+With LIVE_ROLE set (live.py sets it), the agent works that role's tickets
+instead, one every few seconds until stopped; see agent/roles.py.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import sys
 import requests
 
 from agent import planner as planner_mod
+from agent import roles
 from agent import tools
 
 # A ticket is a handful of steps. The bound exists so a model that never
@@ -111,16 +115,17 @@ def system_message(mode: str, ticket: dict) -> str:
 
 
 def run_once(session, planner_obj, port: str, mode: str, ticket: dict,
-             step_printer) -> list:
+             step_printer, system=None) -> list:
     """Work one ticket. Returns the actions taken, ending in finish.
 
     Raises AgentError if the step bound is reached without finishing, and lets
     a PlannerError from the model propagate — neither is something this loop
-    can paper over.
+    can paper over. `system` replaces the instructions; live mode passes its
+    own.
     """
     names = tools.tool_names(mode)
     messages = [
-        {"role": "system", "content": system_message(mode, ticket)},
+        {"role": "system", "content": system or system_message(mode, ticket)},
         {"role": "user", "content": "Begin. Choose your first action."},
     ]
     steps = []
@@ -192,11 +197,57 @@ def _print_step(action_name: str, result) -> None:
         print(f"  tool  \u2192 {result}", flush=True)
 
 
+def live_system_message(ticket: dict) -> str:
+    """Live mode's instructions: the role, its tools, the ticket."""
+    return "\n".join([
+        ticket["system"],
+        "Choose exactly ONE next action per turn.",
+        f"Available tools: {', '.join(ticket['tools'])}.",
+        ticket["task"],
+        f"Every tool takes customer_id \"{ticket['customer_id']}\".",
+        "When every required step is done, choose finish.",
+    ])
+
+
+def live_handler(session, planner_obj, port: str, calls: list):
+    """Live mode's handle(ticket): run_once with the role's tools and text.
+
+    Each tool call is recorded in `calls` as (name, succeeded); a refused one
+    (a 503 or 429 from the CRM, or a missing argument) counts as failed.
+    """
+    def record(name: str, result) -> None:
+        if name != tools.FINISH:
+            calls.append((name, not str(result).startswith("refused:")))
+
+    def handle(ticket: dict) -> None:
+        mode = ticket["role"] + ("-drift" if ticket["drift"] else "")
+        ticket = dict(ticket, id=f"live-{ticket['number']}")
+        run_once(session, planner_obj, port, mode, ticket, record,
+                 system=live_system_message(ticket))
+
+    return handle
+
+
+def live(port: str) -> int:
+    """Live mode: LIVE_ROLE's tickets, one every few seconds, until stopped."""
+    session = CountingSession()
+    planner_obj = planner_mod.Planner(
+        session, os.environ.get("OLLAMA_URL") or planner_mod.default_url(),
+        model=planner_mod.model_from_environment(),
+        temperature=planner_mod.temperature_from_environment())
+    calls = []
+    roles.serve(live_handler(session, planner_obj, port, calls), calls)
+    return 0
+
+
 def main() -> int:
     port = os.environ.get("SUPPORT_AGENT_PORT")
     if not port:
         print("SUPPORT_AGENT_PORT is not set", file=sys.stderr)
         return 2
+
+    if os.environ.get("LIVE_ROLE"):
+        return live(port)
 
     mode = os.environ.get("SUPPORT_AGENT_MODE", "reference")
     if mode not in ("reference", "candidate"):
