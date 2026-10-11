@@ -17,12 +17,21 @@ macOS and on systemd Linux with no ``/etc/hosts`` edit and no DNS query.
 Nothing here is random, timed or stateful across requests. A demo whose
 evidence changed between runs would make a behavioral comparison impossible
 to reason about.
+
+The one exception is opt-in and belongs to live mode (`make live`):
+CRM_ERROR_RATE, unset or 0 everywhere else, is the share of requests answered
+503 (429 for /refunds) so a long-running fleet shows the occasional failed
+call; CRM_ERROR_SEED makes that sequence repeatable. Live mode's own CRM routes
+(/replies, /invoices/<id>, /refunds, /plans on crm.localhost) are the quick
+starts' routes, so their agents and this one call the same API.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import random
 import socket
 import socketserver
 import sys
@@ -65,6 +74,23 @@ HISTORY = {
     ],
     "46": [{"id": "ev-6", "kind": "data_request", "at": "2026-09-06"}],
 }
+
+
+# Live mode only (see the module docstring). 0 unless set.
+ERROR_RATE = float(os.environ.get("CRM_ERROR_RATE") or 0)
+RNG = random.Random(os.environ.get("CRM_ERROR_SEED") or None)
+
+# Live mode's invoices and plans, keyed like CUSTOMERS. Separate from INVOICES
+# above so the reference fixtures stay exactly as they are.
+LIVE_INVOICES = {
+    "42": [{"id": "inv-4201", "month": "2026-09", "amount": "49.00", "status": "paid"},
+           {"id": "inv-4202", "month": "2026-09", "amount": "49.00", "status": "paid"}],
+    "43": [],
+    "44": [{"id": "inv-4401", "month": "2026-03", "amount": "120.00", "status": "paid"}],
+    "45": [],
+    "46": [{"id": "inv-4601", "month": "2026-09", "amount": "49.00", "status": "overdue"}],
+}
+PLANS = ("free", "pro", "team")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,6 +139,16 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return {}
 
+    def _failed(self, path: str) -> bool:
+        """Live mode's injected error, CRM_ERROR_RATE of the time. True when sent."""
+        if ERROR_RATE <= 0 or RNG.random() >= ERROR_RATE:
+            return False
+        if path == "/refunds":
+            self._send(429, {"error": "too many refunds, try again later"})
+        else:
+            self._send(503, {"error": "temporarily unavailable"})
+        return True
+
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
         path = self.path.split("?", 1)[0]
 
@@ -122,7 +158,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"status": "ok"})
             return
 
+        if self._failed(path):
+            return
+
         service = self._service()
+        if service == "crm.localhost" and path.startswith("/invoices/"):
+            customer_id = path.rsplit("/", 1)[-1]
+            if customer_id not in LIVE_INVOICES:
+                self._send(404, {"error": "no such customer"})
+                return
+            self._send(200, {"customer_id": customer_id, "invoices": LIVE_INVOICES[customer_id]})
+            return
+
         if service == "crm.localhost" and path.startswith("/crm/customers/"):
             customer_id = path.rsplit("/", 1)[-1]
             record = CUSTOMERS.get(customer_id)
@@ -154,6 +201,24 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         body = self._read_body()
         service = self._service()
+
+        if self._failed(path):
+            return
+
+        if service == "crm.localhost" and path == "/replies":
+            self._send(201, {"status": "sent"})
+            return
+
+        if service == "crm.localhost" and path == "/refunds":
+            self._send(201, {"status": "refunded"})
+            return
+
+        if service == "crm.localhost" and path == "/plans":
+            if body.get("plan") not in PLANS:
+                self._send(400, {"error": f"plan must be one of {', '.join(PLANS)}"})
+                return
+            self._send(201, {"status": "changed"})
+            return
 
         if service == "mail.localhost" and path == "/mail/send":
             self._send(202, {"queued": True, "to": body.get("to", "")})
