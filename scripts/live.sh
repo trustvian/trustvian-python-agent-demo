@@ -27,12 +27,25 @@ demo_init
 "$DEMO_ROOT/scripts/bootstrap.sh"
 require_trustvian_dev
 
-# The host's Ollama is started or reused as `make demo` does; in a container,
-# where there is no ollama binary, the model must already answer.
+# The host's Ollama is started or reused as `make demo` does. In a container
+# there is no ollama binary, and the model must already answer. That is asked
+# with the agent's own HTTP client rather than lib.sh's curl probe: curl
+# resolves every *.localhost name to its own loopback (RFC 6761) and ignores
+# the extra_hosts entry that points ollama.localhost at the host.
 if command -v ollama >/dev/null 2>&1; then
     ensure_ollama
 else
-    require_model_answers
+    "$VENV_DIR/bin/python" - "$OLLAMA_AGENT_API" "$OLLAMA_MODEL_NAME" <<'PY' \
+        || fail "the model $OLLAMA_MODEL_NAME did not answer at $OLLAMA_AGENT_API"
+import sys, requests
+reply = requests.post(sys.argv[1] + "/api/chat", timeout=180, json={
+    "model": sys.argv[2], "stream": False,
+    "messages": [{"role": "user", "content": "Reply with: ok"}],
+    "options": {"temperature": 0, "num_predict": 4}})
+reply.raise_for_status()
+reply.json()["message"]["content"]  # a usable reply; never printed
+PY
+    log "$OLLAMA_MODEL_NAME answered at $OLLAMA_AGENT_API"
 fi
 
 export CRM_ERROR_RATE="${CRM_ERROR_RATE:-0.05}"

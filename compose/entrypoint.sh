@@ -7,6 +7,9 @@
 #   scenario [FILE]       tools/scenario.py (default scenarios/support-demo.yaml);
 #                         needs Ollama at ollama.localhost:11434
 #   stability [RUNS]      tools/stability.py scenarios/stability.yaml --runs RUNS
+#   live                  live mode (scripts/live.sh): three agents that keep
+#                         working until the container stops, attached to a
+#                         control plane published on http://127.0.0.1:8080/
 #   web                   serve this container's control-plane state (after a
 #                         scenario in the SAME container, e.g. from `shell`)
 #                         on http://127.0.0.1:8080/ (run with --service-ports);
@@ -30,6 +33,8 @@ usage: docker compose run --rm [--service-ports] demo <subcommand>
   scenario [FILE]       tools/scenario.py (default scenarios/support-demo.yaml);
                         needs Ollama at ollama.localhost:11434
   stability [RUNS]      tools/stability.py scenarios/stability.yaml --runs RUNS
+  live                  live mode: three agents until stopped; WebUI on
+                        http://127.0.0.1:8080/ (compose.yaml's `live` service)
   web                   serve this container's control-plane state on
                         http://127.0.0.1:8080/ (TRUSTVIAN_WEB=1 makes
                         `scenario` do this by itself)
@@ -105,6 +110,37 @@ case "${1:-help}" in
             --model "${OLLAMA_MODEL:-gemma3:4b}" \
             --results "$OUT/stability-results.json"
         echo "results: ./out/stability-results.json"
+        ;;
+    live)
+        # A control plane that outlives each run, on loopback and relayed to
+        # 0.0.0.0:8080 like `web`, with its database in the live-state volume
+        # so `docker compose down` keeps the learned baseline.
+        live_state="${LIVE_STATE_DIR:-/var/lib/trustvian-live}"
+        mkdir -p "$live_state"
+        .demo/bin/trustvian-local --state-dir "$live_state" --listen 127.0.0.1:18080 \
+            >"$OUT/runtime-live.log" 2>&1 &
+        local_pid=$!
+        for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:18080/v1/projects?limit=1" && break
+            sleep 1
+        done
+        socat "TCP-LISTEN:${TRUSTVIAN_PUBLIC_PORT:-8080},fork,reuseaddr" "TCP:127.0.0.1:18080" &
+        socat_pid=$!
+        echo "live: open http://127.0.0.1:8080/ on the host"
+        LIVE_API_URL="http://127.0.0.1:18080" ./scripts/live.sh &
+        live_pid=$!
+        # `docker compose stop` signals this script (PID 1) only: pass it on,
+        # so dev completes the run before the control plane goes away.
+        trap 'kill -TERM "$live_pid" 2>/dev/null || true' TERM INT
+        status=0
+        wait "$live_pid" || status=$?
+        while kill -0 "$live_pid" 2>/dev/null; do
+            status=0
+            wait "$live_pid" || status=$?
+        done
+        kill -TERM "$socat_pid" "$local_pid" 2>/dev/null || true
+        wait "$local_pid" 2>/dev/null || true
+        exit "$status"
         ;;
     web)
         serve_web

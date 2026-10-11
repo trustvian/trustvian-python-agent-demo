@@ -14,6 +14,11 @@
 #   docker compose run --rm --service-ports demo scenario         # Ollama on the host
 #   docker compose run --rm --service-ports demo web              # browse the last result
 #
+# Live mode, three agents that keep working until stopped:
+#
+#   docker compose --profile live up -d --build                   # WebUI on http://127.0.0.1:8080/
+#   docker compose --profile live down                            # stops it; the baseline is kept
+#
 # Ollama: the default is the one on your host, reached as ollama.localhost ->
 # host-gateway. On Linux it must listen on all interfaces
 # (OLLAMA_HOST=0.0.0.0). For an Ollama inside Compose:
@@ -68,6 +73,33 @@ services:
       - demo
     restart: "no"
 
+  live:
+    # The demo image, long-running: scripts/live.sh attached to a control
+    # plane of its own, published on 127.0.0.1:8080. Started only with
+    # `--profile live`; the one-shot demo service is unchanged.
+    extends:
+      service: demo
+    profiles: !override ["live"]
+    command: ["live"]
+    environment:
+      # Live mode's model (scripts/live.sh says why it is not gemma3:4b).
+      OLLAMA_MODEL: ${LIVE_OLLAMA_MODEL:-qwen2.5:3b}
+      CRM_ERROR_RATE: ${CRM_ERROR_RATE:-0.05}
+      LIVE_AGENTS: ${LIVE_AGENTS:-support,billing,accounts}
+      LIVE_INTERVAL_SECONDS: ${LIVE_INTERVAL_SECONDS:-10}
+      LIVE_DRIFT_EVERY: ${LIVE_DRIFT_EVERY:-20}
+      LIVE_MAX_TICKETS: ${LIVE_MAX_TICKETS:-0}
+      TRUSTVIAN_LIVE_AGENT: ${TRUSTVIAN_LIVE_AGENT:-support-fleet}
+    volumes:
+      # The control plane's database and dev's own state (the learned
+      # baseline): kept by `down`, discarded by `down -v`.
+      - live-state:/var/lib/trustvian-live
+      - live-dev-state:/root/.trustvian
+    # `down` sends SIGTERM; dev stops live.py, live.py its workers (SIGKILL
+    # after 5 s), and dev completes the run before the control plane stops.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest
@@ -86,3 +118,5 @@ networks:
 
 volumes:
   ollama-models:
+  live-state:
+  live-dev-state:
