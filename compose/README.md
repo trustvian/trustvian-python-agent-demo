@@ -28,10 +28,10 @@ loopback; `compose.yaml` supplies the five names through `extra_hosts`.
 
 | File | What |
 |---|---|
-| `compose.yaml` | the stack: `demo` (one-shot) and `ollama` (optional, profile) |
+| `compose.yaml` | the stack: `demo` (one-shot), `live` (live mode, profile) and `ollama` (optional, profile) |
 | `Dockerfile` | `python:3.12-slim-bookworm` + jq/curl, the v0.10.0 archive and collector image (both pinned), `make bootstrap` |
 | `Dockerfile.dockerignore` | keeps `.demo/`, `.runtime/`, `.trustvian/` and `.git/` out of the build context |
-| `entrypoint.sh` | `smoke`, `scenario`, `stability`, `web`, `make …`, `shell` |
+| `entrypoint.sh` | `smoke`, `scenario`, `stability`, `live`, `web`, `make …`, `shell` |
 | `out/` | created on first run: results JSON and the `.runtime/` logs of each command |
 
 ## 1. Build
@@ -140,6 +140,26 @@ docker compose run --rm demo stability 10          # RUNS; TEMPERATURE=0.7 by de
 ```
 
 Writes `./out/stability-results.json`, the input of `docs/results/`.
+
+## Live mode
+
+Three agents that keep working until stopped (the top-level README's
+[Live mode](../README.md#live-mode)), as a long-running service with a
+control plane of its own:
+
+```bash
+docker compose --profile live up -d --build   # WebUI on http://127.0.0.1:8080/
+docker compose logs -f live                   # one line per ticket
+docker compose --profile live down            # dev completes the run; volumes kept
+```
+
+The model is the host's Ollama at `ollama.localhost:11434`, as for
+`scenario`, and must already answer with `qwen2.5:3b` (`LIVE_OLLAMA_MODEL`
+picks another). The control plane's database and dev's baseline live in the
+`live-state` and `live-dev-state` volumes: `down` keeps them, `down -v`
+discards them. `LIVE_AGENTS`, `LIVE_INTERVAL_SECONDS`, `LIVE_DRIFT_EVERY`,
+`LIVE_MAX_TICKETS` and `CRM_ERROR_RATE` are read from the environment or
+`.env`.
 
 ## Other commands
 

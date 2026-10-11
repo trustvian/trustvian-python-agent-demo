@@ -135,7 +135,7 @@ def action_schema(tool_names) -> dict:
     an action that ignores it, which nothing downstream reads — and that is
     cheaper than an action that can never run.
     """
-    return {
+    schema = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(tool_names) + [FINISH]},
@@ -148,6 +148,21 @@ def action_schema(tool_names) -> dict:
         "required": ["action", "customer_id", "query", "email_subject",
                      "email_body", "reason"],
     }
+    # Live mode's tools take three more fields. Added only when one of those
+    # tools is offered, so the reference and candidate schemas — and every
+    # measurement made with them — are exactly what they were.
+    for tool, field, spec in LIVE_FIELDS:
+        if tool in tool_names:
+            schema["properties"][field] = spec
+            schema["required"].append(field)
+    return schema
+
+
+LIVE_FIELDS = (
+    ("send_reply", "message", {"type": "string"}),
+    ("issue_refund", "invoice_id", {"type": "string"}),
+    ("change_plan", "plan", {"type": "string", "enum": ["free", "pro", "team"]}),
+)
 
 
 class Planner:

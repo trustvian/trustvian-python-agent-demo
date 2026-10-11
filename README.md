@@ -31,6 +31,7 @@ Each one is honest about what it proves.
 | PR workflow | A PR that changes agent behavior gets a Trustvian comment and a failing check | no | phase 3 |
 | `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead — [results](docs/results/2026-09-27-stability.md) | yes (a simulated variant needs none) | **now** |
 | `make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>` | Task 078's re-run at tool fidelity: N isolated repetitions per side, every attempt recorded — [results](docs/results/2026-10-01-stability-tool-fidelity.md) | yes | **now** |
+| `make live` | Three agents' behavior arriving continuously in the Live view, with a rare new behavior and a rare failed call — [Live mode](#live-mode) | Ollama `qwen2.5:3b` | **now** |
 | `make injection-bench` | A prompt injection hidden in data changes behavior, and Trustvian catches it without reading content | yes | phase 4 |
 
 The phased rows are specified in
@@ -424,6 +425,118 @@ make scenario SCENARIO=scenarios/support-demo.yaml   # the model-driven one
 Every gate limit must be stated. Zero is the strictest limit there is, so an
 omitted one is a usage error naming it rather than a silent default.
 
+## Live mode
+
+`make demo` and the scenarios are runs that end. Live mode is one that does
+not: three agents, each its own process and its own actor, work a ticket
+every few seconds until you stop them, so the Live view fills continuously.
+It is a separate entry point; the demo, smoke, scenario, stability and
+fidelity paths do not call it and are unchanged by it.
+
+```bash
+make live        # Ctrl-C to stop
+```
+
+| Actor (`service.name`) | Tools | Tickets (eight each, e.g.) |
+|---|---|---|
+| `support-agent` | `lookup_customer`, `send_reply` | "How do I reset my password?" |
+| `billing-agent` | `lookup_customer`, `lookup_invoice`, `issue_refund` | "I was charged twice this month." |
+| `accounts-agent` | `lookup_customer`, `change_plan` | "Please upgrade me to Pro." |
+
+These are the quick starts' roles and tool names, so the behaviors read the
+same in every project. `make live` (`scripts/live.sh`) bootstraps, starts or
+reuses Ollama, starts its own mock services and runs
+
+```bash
+trustvian dev --project support-demo --agent support-fleet --environment local \
+  --candidate live --instrumentation existing -- .demo/venv/bin/python live.py
+```
+
+`live.py` starts one worker per role — the instrumented agent exactly as every
+other run starts it (`opentelemetry-instrument python harness/run_agent.py`)
+— with `OTEL_SERVICE_NAME=<role>-agent` and `LIVE_ROLE=<role>`;
+`agent/main.py` sees `LIVE_ROLE` and works that role's tickets
+(`agent/roles.py`) with the same planner loop. Two things happen on purpose,
+and rarely:
+
+- **Drift.** Every 20th billing ticket also offers `export_customer` and asks
+  for an export: a new behavior on an actor Trustvian has already learned.
+- **Failed calls.** These mock services answer about 5% of requests with
+  `503` (`429` for refunds). Every other entry point starts them with no error
+  rate, deterministic as before. A failed call is a refused action the model
+  hears about, as a missing argument is.
+
+`live.py` prints one line per ticket, never its text:
+
+```text
+live: 3 agents (support-agent, billing-agent, accounts-agent), one ticket each every ~10 s, until stopped (Ctrl-C)
+support-agent   ticket 2    tools: lookup_customer, lookup_customer, send_reply  (12.2 s)  failed calls: 1
+billing-agent   ticket 2    tools: lookup_customer, lookup_invoice, issue_refund  (17.0 s)
+billing-agent   ticket 20   tools: lookup_customer, lookup_invoice, issue_refund, export_customer  (18.3 s)  [drift]
+```
+
+On **Ctrl-C**, `live.py` stops every worker (SIGTERM, SIGKILL after 5 s) and
+exits 0, dev prints `Run dev-live-… complete.`, and `make live` stops its
+mock services.
+
+Live mode's model is **`qwen2.5:3b`**, not `gemma3:4b`: with three workers on
+one Ollama, `gemma3:4b` wrote prose into every field of the action schema and
+took 100–290 s a ticket, `qwen2.5:3b` 10–14 s at the median. `OLLAMA_MODEL`
+overrides it, and `make live` pulls the model when it is missing, as `make
+demo` does.
+
+What an 11-minute run showed (Trustvian v0.10.0, `qwen2.5:3b` on an Apple M3
+Pro laptop, Ollama with `OLLAMA_NUM_PARALLEL=1`):
+
+- **One agent in the Live view, three actors in the evidence.** The Live
+  view's Agent, its Behavior flow and every Live stream row name the run's
+  agent, `support-fleet`. Which worker did what is in each observation's
+  `actor_id` (`support-agent`, `billing-agent`, `accounts-agent`), which
+  `GET /v1/evaluation-runs/<run>/observations` returns.
+- **A steady stream.** 85 tickets (28, 25 and 32), about 1,000 observations;
+  a ticket took 10–14 s at the median and 35 s at most. The workers never
+  fall behind — each finishes its ticket before it waits for the next — but
+  a slower model means fewer tickets.
+- **9 behaviors before the drift.** `external/qwen2.5:3b → ollama` and
+  `http/POST → ollama.localhost` (the planner's model call and its
+  transport), `http/GET` and `http/POST → crm.localhost`, and five tools,
+  each under the actor whose role has it: `lookup_customer`, `send_reply`,
+  `lookup_invoice`, `issue_refund`, `change_plan`.
+- **The drift** appeared once, at billing ticket 20, about 8½ minutes in —
+  later than in the quick starts, because a ticket takes longer here:
+  `tool/export_customer` and `http/POST → export.localhost`, both NEW.
+- **Failed calls:** the ticket lines counted 11 refused tool calls, and 20
+  observations carry an error status (tool spans, the HTTP requests beneath
+  them, and two model calls): the injected `503`/`429`, and actions the
+  services refused, such as an invoice id the model made up. The run went
+  on.
+
+| Variable | Default | |
+|---|---|---|
+| `LIVE_AGENTS` | `support,billing,accounts` | the roles to run |
+| `LIVE_INTERVAL_SECONDS` | `10` | one ticket per agent this often, ±50% jitter |
+| `LIVE_DRIFT_EVERY` | `20` | every Nth billing ticket also exports; `0` = never |
+| `LIVE_MAX_TICKETS` | `0` | tickets per agent, then stop; `0` = until stopped |
+| `CRM_ERROR_RATE` | `0.05` | share of mock-service requests that fail; `0` = none |
+| `OLLAMA_MODEL` | `qwen2.5:3b` | live mode's model |
+
+The three workers share one Ollama, which serves `OLLAMA_NUM_PARALLEL`
+requests at a time and queues the rest; at `1`, as measured above, a ticket
+waits for the other agents' model calls, which is what the median includes.
+
+With Docker Compose, from `compose/`, live mode is a service of its own with
+its own control plane on `http://127.0.0.1:8080/` and the host's Ollama
+(see [compose/README.md](compose/README.md#live-mode)):
+
+```bash
+docker compose --profile live up -d --build
+docker compose logs -f live               # the per-ticket lines
+docker compose --profile live down        # stops it; dev completes the run
+```
+
+`down` keeps the `live-state` volumes, so the next `up` is scored against what
+this one taught; `down -v` forgets it. `LIVE_OLLAMA_MODEL` picks its model.
+
 ## Who computes what
 
 Every verdict in this repository comes from a Trustvian control-plane
@@ -566,6 +679,7 @@ make demo        # the full interactive demo, leaves the runtime up
 make scenario    # run a scenario file unattended
 make stability   # measure an unchanged agent against itself: RUNS=10 TEMPERATURE=0.7
 make fidelity-sweep  # the tool-fidelity re-run: RUNS TEMPERATURE TIMEOUT RESULTS, all required
+make live        # live mode: three agents until Ctrl-C
 make smoke       # every guarantee, asserted non-interactively, no model
 make bootstrap   # build Trustvian and create the Python environments
 make clean       # remove every generated artifact, including the database
@@ -735,6 +849,9 @@ scripts/runtime.sh         the control plane many runs attach to
 scripts/clean.sh           make clean
 scripts/demo.sh            make demo
 scripts/smoke.sh           make smoke
+scripts/live.sh            make live
+live.py                    live mode's supervisor: one worker per role
+agent/roles.py             live mode's roles, tickets and per-worker loop
 tools/tvdemo/              the scenario runner, the stability sweep, this repo's tooling
 docs/results/              measured numbers, committed
 tests/                     the agent's unit tests

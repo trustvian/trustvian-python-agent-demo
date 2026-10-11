@@ -42,6 +42,17 @@ TOOL_NAMES_REFERENCE = (
 )
 TOOL_NAMES_CANDIDATE = TOOL_NAMES_REFERENCE + ("export_customer",)
 
+# Live mode's tools, per role (agent/roles.py): the same names as in the quick
+# starts, so the behaviors read the same everywhere. All but export_customer
+# talk to the CRM service; export_customer is the candidate's tool above, bound
+# to a billing ticket only when it drifts.
+LIVE_TOOL_NAMES = {
+    "support": ("lookup_customer", "send_reply"),
+    "billing": ("lookup_customer", "lookup_invoice", "issue_refund"),
+    "billing-drift": ("lookup_customer", "lookup_invoice", "issue_refund", "export_customer"),
+    "accounts": ("lookup_customer", "change_plan"),
+}
+
 REQUEST_TIMEOUT = 30
 
 # A customer id reaches a URL path, so it is restricted to characters that
@@ -64,6 +75,8 @@ def tool_names(mode: str) -> tuple:
         return TOOL_NAMES_REFERENCE
     if mode == "candidate":
         return TOOL_NAMES_CANDIDATE
+    if mode in LIVE_TOOL_NAMES:
+        return LIVE_TOOL_NAMES[mode]
     raise ValueError(f"unknown mode {mode!r}")
 
 
@@ -194,6 +207,48 @@ def dispatch(session, port: str, name: str, action: dict, mode: str) -> str:
                                "subject": subject, "body": body},
                          timeout=REQUEST_TIMEOUT), url)
         return "reply queued"
+
+    # Live mode's tools. A refused request (live mode's occasional 503, or 429
+    # for a refund) is a ToolError like any other: the model hears about it
+    # and the ticket carries on.
+    if name == "lookup_customer":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(CRM, port)}/crm/customers/{customer_id}"
+        customer = _payload(session.get(url, timeout=REQUEST_TIMEOUT),
+                            url)["customer"]
+        return f"customer {customer['id']} is {customer['name']}, {customer['tier']} tier"
+
+    if name == "send_reply":
+        customer_id = _require_id(action, "customer_id")
+        message = _require(action, "message")
+        url = f"{_base(CRM, port)}/replies"
+        body = _payload(session.post(url, json={"customer_id": customer_id, "message": message},
+                                     timeout=REQUEST_TIMEOUT), url)
+        return f"reply {body['status']}"
+
+    if name == "lookup_invoice":
+        customer_id = _require_id(action, "customer_id")
+        url = f"{_base(CRM, port)}/invoices/{customer_id}"
+        invoices = _payload(session.get(url, timeout=REQUEST_TIMEOUT), url)["invoices"]
+        if not invoices:
+            return "no invoices on file"
+        return "; ".join(f"{i['id']} {i['month']} {i['amount']} {i['status']}" for i in invoices)
+
+    if name == "issue_refund":
+        customer_id = _require_id(action, "customer_id")
+        invoice_id = _require_id(action, "invoice_id")
+        url = f"{_base(CRM, port)}/refunds"
+        body = _payload(session.post(url, json={"customer_id": customer_id, "invoice_id": invoice_id},
+                                     timeout=REQUEST_TIMEOUT), url)
+        return f"refund {body['status']}"
+
+    if name == "change_plan":
+        customer_id = _require_id(action, "customer_id")
+        plan = _require(action, "plan")
+        url = f"{_base(CRM, port)}/plans"
+        body = _payload(session.post(url, json={"customer_id": customer_id, "plan": plan},
+                                     timeout=REQUEST_TIMEOUT), url)
+        return f"plan {body['status']}"
 
     # Unreachable while `available` and the branches above agree, and kept so
     # that adding a name to one without the other fails loudly here rather
