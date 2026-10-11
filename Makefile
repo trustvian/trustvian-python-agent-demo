@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke scenario stability release-smoke bootstrap clean
+.PHONY: help demo smoke scenario stability release-smoke bootstrap clean live
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -16,6 +16,9 @@ help: ## Show this help
 
 demo: ## Run the full reference demo and leave the runtime up for inspection
 	@./scripts/demo.sh
+
+live: ## Live mode: three agents that keep working until Ctrl-C (see live.py)
+	@./scripts/live.sh
 
 smoke: ## Run the same path non-interactively and assert every guarantee
 	@./scripts/smoke.sh
