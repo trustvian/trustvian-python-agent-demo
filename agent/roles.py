@@ -5,7 +5,7 @@ Imports neither OpenTelemetry nor Trustvian: the agent-specific part is the
 tool calls in. The same roles, tools and loop as the quick starts' roles.py;
 the customer ids are this demo's.
 
-live.py starts one worker per role, each the harness
+live.py starts one `trustvian dev` per role, each running the harness
 (`opentelemetry-instrument python harness/run_agent.py`) with LIVE_ROLE set;
 agent/main.py sees LIVE_ROLE and calls serve() instead of its usual run.
 
@@ -160,8 +160,10 @@ def serve(handle, calls: list) -> None:
     seed = os.environ.get("LIVE_SEED")
     rng = random.Random(f"{seed}-{role}-{number}" if seed else None)
 
-    # SIGTERM from live.py: leave through SystemExit, so the harness's atexit
-    # flush still sends the spans already recorded.
+    # SIGINT, which dev forwards when live.py stops it, or SIGTERM: leave
+    # through SystemExit with status 0, so the harness's atexit flush still
+    # sends the spans already recorded and dev completes the run.
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     _exit_with_parent()
 
@@ -185,7 +187,7 @@ def serve(handle, calls: list) -> None:
 
 
 def _exit_with_parent() -> None:
-    """Never outlive live.py: if it disappears, stop as if it had sent SIGTERM."""
+    """Never outlive the parent (dev): if it disappears, stop as if it had sent SIGTERM."""
     parent = os.getppid()
 
     def watch() -> None:

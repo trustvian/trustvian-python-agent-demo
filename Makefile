@@ -17,7 +17,7 @@ help: ## Show this help
 demo: ## Run the full reference demo and leave the runtime up for inspection
 	@./scripts/demo.sh
 
-live: ## Live mode: three agents that keep working until Ctrl-C (see live.py)
+live: ## Live mode: three agents, one run each, until Ctrl-C; needs TRUSTVIAN_API_URL (see live.py)
 	@./scripts/live.sh
 
 smoke: ## Run the same path non-interactively and assert every guarantee

@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""A stand-in for `trustvian dev`: no control plane, no Collector, no network.
+
+Records its arguments, prints the lines of dev's output live.py reads (the
+banner's Run line, "Running …" and "Run <id> complete."), runs the command
+after `--` in a process group of its own with OTEL_SERVICE_NAME=<--agent>,
+forwards SIGINT and SIGTERM to that group, and exits with the command's status.
+
+  STUB_DIR              appends its arguments to <agent>.dev, its pid to <agent>.devpid
+  STUB_DEV_FAIL_ONCE    exits 3 before the command starts, once per agent
+  STUB_DEV_IGNORE_INT   ignores SIGINT and SIGTERM and forwards neither
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+args = sys.argv[1:]
+split = args.index("--")
+flags, command = args[:split], args[split + 1:]
+if flags[0] != "dev":
+    sys.exit(f"stub trustvian: only `dev` is stubbed, got {flags[0]!r}")
+options = dict(zip(flags[1::2], flags[2::2]))
+agent = options["--agent"]
+stub_dir = os.environ["STUB_DIR"]
+
+
+def record(name: str, value: str) -> None:
+    with open(os.path.join(stub_dir, f"{agent}.{name}"), "a") as f:
+        f.write(value + "\n")
+
+
+record("dev", json.dumps(flags[1:]))
+record("devpid", str(os.getpid()))
+failed = os.path.join(stub_dir, f"{agent}.devfailed")
+if os.environ.get("STUB_DEV_FAIL_ONCE") and not os.path.exists(failed):
+    open(failed, "w").close()
+    print("trustvian dev: creating the project: already_exists: a resource with that identity already exists",
+          flush=True)
+    sys.exit(3)
+
+run = f"dev-{options['--candidate']}-{time.time_ns()}"
+print(f"Trustvian dev\n\n  Agent       {agent}\n  Run         {run}\n", flush=True)
+print(f"Running {command[0]}\n", flush=True)
+child = subprocess.Popen(command, env={**os.environ, "OTEL_SERVICE_NAME": agent},
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+
+
+def forward(sig, _frame) -> None:
+    try:
+        os.killpg(child.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, signal.SIG_IGN if os.environ.get("STUB_DEV_IGNORE_INT") else forward)
+status = child.wait()
+print(f"\nRun {run} complete.", flush=True)
+sys.exit(status if status >= 0 else 128 - status)
