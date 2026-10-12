@@ -143,19 +143,22 @@ Writes `./out/stability-results.json`, the input of `docs/results/`.
 
 ## Live mode
 
-Three agents that keep working until stopped (the top-level README's
-[Live mode](../README.md#live-mode)), as a long-running service with a
-control plane of its own:
+Three agents that keep working until stopped, each its own run (the
+top-level README's [Live mode](../README.md#live-mode)), as a long-running
+service with a control plane of its own. In its one container, live.py
+starts one `trustvian dev` per agent, three dev processes and three
+Collectors, each attached to that control plane; the Live view lists the
+three agents as three cards.
 
 ```bash
 docker compose --profile live up -d --build   # WebUI on http://127.0.0.1:8080/
-docker compose logs -f live                   # one line per ticket
-docker compose --profile live down            # dev completes the run; volumes kept
+docker compose logs -f live                   # the run ids, then one line per ticket
+docker compose --profile live down            # every dev completes its run; volumes kept
 ```
 
 The model is the host's Ollama at `ollama.localhost:11434`, as for
 `scenario`, and must already answer with `qwen2.5:3b` (`LIVE_OLLAMA_MODEL`
-picks another). The control plane's database and dev's baseline live in the
+picks another). The control plane's database and dev's baselines live in the
 `live-state` and `live-dev-state` volumes: `down` keeps them, `down -v`
 discards them. `LIVE_AGENTS`, `LIVE_INTERVAL_SECONDS`, `LIVE_DRIFT_EVERY`,
 `LIVE_MAX_TICKETS` and `CRM_ERROR_RATE` are read from the environment or
