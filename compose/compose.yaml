@@ -74,9 +74,11 @@ services:
     restart: "no"
 
   live:
-    # The demo image, long-running: scripts/live.sh attached to a control
-    # plane of its own, published on 127.0.0.1:8080. Started only with
-    # `--profile live`; the one-shot demo service is unchanged.
+    # The demo image, long-running: a control plane of its own, published on
+    # 127.0.0.1:8080, and scripts/live.sh, whose live.py starts one
+    # `trustvian dev` per role attached to it (three dev processes and three
+    # Collectors in this one container). Started only with `--profile live`;
+    # the one-shot demo service is unchanged.
     extends:
       service: demo
     profiles: !override ["live"]
@@ -89,14 +91,13 @@ services:
       LIVE_INTERVAL_SECONDS: ${LIVE_INTERVAL_SECONDS:-10}
       LIVE_DRIFT_EVERY: ${LIVE_DRIFT_EVERY:-20}
       LIVE_MAX_TICKETS: ${LIVE_MAX_TICKETS:-0}
-      TRUSTVIAN_LIVE_AGENT: ${TRUSTVIAN_LIVE_AGENT:-support-fleet}
     volumes:
       # The control plane's database and dev's own state (the learned
       # baseline): kept by `down`, discarded by `down -v`.
       - live-state:/var/lib/trustvian-live
       - live-dev-state:/root/.trustvian
-    # `down` sends SIGTERM; dev stops live.py, live.py its workers (SIGKILL
-    # after 5 s), and dev completes the run before the control plane stops.
+    # `down` sends SIGTERM; live.py sends every dev SIGINT (SIGKILL after
+    # 20 s), and each dev completes its run before the control plane stops.
     stop_grace_period: 30s
     restart: unless-stopped
 

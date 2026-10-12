@@ -8,8 +8,9 @@
 #                         needs Ollama at ollama.localhost:11434
 #   stability [RUNS]      tools/stability.py scenarios/stability.yaml --runs RUNS
 #   live                  live mode (scripts/live.sh): three agents that keep
-#                         working until the container stops, attached to a
-#                         control plane published on http://127.0.0.1:8080/
+#                         working until the container stops, each its own
+#                         run on a control plane published on
+#                         http://127.0.0.1:8080/
 #   web                   serve this container's control-plane state (after a
 #                         scenario in the SAME container, e.g. from `shell`)
 #                         on http://127.0.0.1:8080/ (run with --service-ports);
@@ -127,10 +128,11 @@ case "${1:-help}" in
         socat "TCP-LISTEN:${TRUSTVIAN_PUBLIC_PORT:-8080},fork,reuseaddr" "TCP:127.0.0.1:18080" &
         socat_pid=$!
         echo "live: open http://127.0.0.1:8080/ on the host"
-        LIVE_API_URL="http://127.0.0.1:18080" ./scripts/live.sh &
+        TRUSTVIAN_API_URL="http://127.0.0.1:18080" TRUSTVIAN_WEB_URL="http://127.0.0.1:8080/" \
+            ./scripts/live.sh &
         live_pid=$!
         # `docker compose stop` signals this script (PID 1) only: pass it on,
-        # so dev completes the run before the control plane goes away.
+        # so every dev completes its run before the control plane goes away.
         trap 'kill -TERM "$live_pid" 2>/dev/null || true' TERM INT
         status=0
         wait "$live_pid" || status=$?

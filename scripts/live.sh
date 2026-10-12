@@ -8,11 +8,17 @@
 # CRM_ERROR_RATE (default 0.05) so the fleet shows the occasional failed call;
 # every other path starts them with no error rate, deterministic as before.
 #
-# Native: dev starts its own control plane and prints its Web address. With
-# LIVE_API_URL set (the Compose `live` service sets it), dev attaches to that
-# control plane instead.
+# Every agent is its own Trustvian run: live.py starts one `trustvian dev` per
+# role, each attached to the control plane at TRUSTVIAN_API_URL, which must
+# already be running (natively in a terminal of its own; the Compose `live`
+# service starts one in its container).
 
 set -euo pipefail
+
+if [ -z "${TRUSTVIAN_API_URL:-}" ]; then
+    echo "live: set TRUSTVIAN_API_URL to a running control plane; start one with \`.demo/bin/trustvian-local --state-dir .demo/live --listen 127.0.0.1:8080\`" >&2
+    exit 2
+fi
 
 # Live mode's model is qwen2.5:3b, not the demo's gemma3:4b. Measured with three
 # workers sharing one Ollama: gemma3:4b fills every field of the action schema
@@ -52,32 +58,25 @@ export CRM_ERROR_RATE="${CRM_ERROR_RATE:-0.05}"
 start_mocks
 log "local services ready on port $MOCK_PORT; CRM error rate $CRM_ERROR_RATE"
 
-attach=()
-if [ -n "${LIVE_API_URL:-}" ]; then
-    attach=(--api-url "$LIVE_API_URL")
-fi
-
-# The developer's Ctrl-C reaches dev from the terminal by itself, and dev then
-# stops live.py and completes the run. `docker compose stop` sends SIGTERM to
-# this script only, so that one is passed on.
+# live.py finds this build's `trustvian` on PATH and passes the project to
+# every dev it starts. The developer's Ctrl-C reaches live.py from the
+# terminal by itself, and live.py then stops every dev, each completing its
+# run. `docker compose stop` sends SIGTERM to this script only, so that one
+# is passed on.
+PATH="$BIN_DIR:$PATH" \
+TRUSTVIAN_PROJECT="$PROJECT_ID" \
 SUPPORT_AGENT_PORT="$MOCK_PORT" \
 OLLAMA_MODEL="$OLLAMA_MODEL_NAME" \
 PYTHONPATH="${PYTHONPATH:-$DEMO_ROOT}" \
-    "$BIN_DIR/trustvian" dev ${attach[@]+"${attach[@]}"} \
-        --project "$PROJECT_ID" \
-        --agent "${TRUSTVIAN_LIVE_AGENT:-support-fleet}" \
-        --environment "$ENVIRONMENT" \
-        --candidate live \
-        --instrumentation existing \
-        -- "$VENV_DIR/bin/python" "$DEMO_ROOT/live.py" &
-DEV_PID=$!
+    "$VENV_DIR/bin/python" "$DEMO_ROOT/live.py" &
+LIVE_PID=$!
 trap ':' INT
-trap 'kill -TERM "$DEV_PID" 2>/dev/null || true' TERM
+trap 'kill -TERM "$LIVE_PID" 2>/dev/null || true' TERM
 
 status=0
-wait "$DEV_PID" || status=$?
-while kill -0 "$DEV_PID" 2>/dev/null; do
+wait "$LIVE_PID" || status=$?
+while kill -0 "$LIVE_PID" 2>/dev/null; do
     status=0
-    wait "$DEV_PID" || status=$?
+    wait "$LIVE_PID" || status=$?
 done
 exit "$status"
