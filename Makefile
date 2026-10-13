@@ -59,8 +59,8 @@ release-smoke: ## Prove the demo runs from a downloaded release: make release-sm
 	@# documented and hand-tested rather than guarded, which is the trade.
 	@test -n "$(TRUSTVIAN_RELEASE_DIR)" || { \
 		printf 'error: set TRUSTVIAN_RELEASE_DIR to an extracted release archive\n\n'; \
-		printf '    tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz\n'; \
-		printf '    make release-smoke TRUSTVIAN_RELEASE_DIR=$$PWD/trustvian_v0.10.0_darwin_arm64\n\n'; \
+		printf '    tar xzf trustvian_v0.12.0_darwin_arm64.tar.gz\n'; \
+		printf '    make release-smoke TRUSTVIAN_RELEASE_DIR=$$PWD/trustvian_v0.12.0_darwin_arm64\n\n'; \
 		exit 2; }
 	@# A clean .demo/bin, so this cannot pass on binaries a checkout build left
 	@# behind — which is the one way this target could lie.

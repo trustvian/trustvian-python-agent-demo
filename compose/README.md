@@ -5,13 +5,13 @@ laptop remain the primary path; this directory exists for a machine that has
 Docker and nothing else — a CI runner, a colleague's laptop, a cloud VM.
 
 Nothing under `tools/`, `agent/` or `fixtures/` is changed. The container
-holds the published **Trustvian v0.10.0**, with nothing built from source and
+holds the published **Trustvian v0.12.0**, with nothing built from source and
 no Go toolchain:
 
 - `trustvian` and `trustvian-local` from the release archive, checked against
   its pinned sha256;
 - `trustvian-collector` from the release's signed image,
-  `ghcr.io/trustvian/trustvian-collector:v0.10.0@sha256:192b2854…`.
+  `ghcr.io/trustvian/trustvian-collector:v0.12.0@sha256:65bb1b61…`.
 
 It runs `make bootstrap` once at build time, through `scripts/bootstrap.sh`'s
 `TRUSTVIAN_RELEASE_DIR` path, and then the repository's own entry points
@@ -29,7 +29,7 @@ loopback; `compose.yaml` supplies the five names through `extra_hosts`.
 | File | What |
 |---|---|
 | `compose.yaml` | the stack: `demo` (one-shot), `live` (live mode, profile) and `ollama` (optional, profile) |
-| `Dockerfile` | `python:3.12-slim-bookworm` + jq/curl, the v0.10.0 archive and collector image (both pinned), `make bootstrap` |
+| `Dockerfile` | `python:3.12-slim-bookworm` + jq/curl, the v0.12.0 archive and collector image (both pinned), `make bootstrap` |
 | `Dockerfile.dockerignore` | keeps `.demo/`, `.runtime/`, `.trustvian/` and `.git/` out of the build context |
 | `entrypoint.sh` | `smoke`, `scenario`, `stability`, `live`, `web`, `make …`, `shell` |
 | `out/` | created on first run: results JSON and the `.runtime/` logs of each command |
@@ -53,21 +53,23 @@ matches, and creates both virtualenvs. That's the same work
 
 | Input | Pinned as |
 |---|---|
-| collector | `ghcr.io/trustvian/trustvian-collector:v0.10.0@sha256:192b28541fe2441a72d047b3cb72ac93bba0bccf64a140bab4b0673869c9f5ba` |
-| `linux/amd64` archive | sha256 `2a8a2a97…`, as the release's `checksums.txt` lists |
-| `linux/arm64` archive | sha256 `6ced4653…`, as the release's `checksums.txt` lists |
+| collector | `ghcr.io/trustvian/trustvian-collector:v0.12.0@sha256:65bb1b61d35b57b0a1efb9d237f71d0cc02e7b41d1cd30d4a58023c7d0a022f0` |
+| `linux/amd64` archive | sha256 `95b4348d…`, as the release's `checksums.txt` lists |
+| `linux/arm64` archive | sha256 `638961d9…`, as the release's `checksums.txt` lists |
 
-ghcr.io also lists a tag named `sha256-192b2854…`. That is the image's cosign
-signature, not an image; pull the image as `@sha256:192b2854…`.
+ghcr.io also lists a tag named `sha256-65bb1b61…`. That is the image's cosign
+signature, not an image; pull the image as `@sha256:65bb1b61…`.
 
 The collector image is signed keylessly by Trustvian's release workflow. To
-verify it against the exact release identity (the v0.10.0 commit):
+verify it against the exact release identity (the v0.12.0 commit):
 
 ```bash
-cosign verify ghcr.io/trustvian/trustvian-collector@sha256:192b28541fe2441a72d047b3cb72ac93bba0bccf64a140bab4b0673869c9f5ba \
+cosign verify ghcr.io/trustvian/trustvian-collector@sha256:65bb1b61d35b57b0a1efb9d237f71d0cc02e7b41d1cd30d4a58023c7d0a022f0 \
   --certificate-identity https://github.com/trustvian/trustvian/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-github-workflow-sha 4201dc14719ebdc75ef80b7e6eb8ce8a3f6f9a92
+  --certificate-github-workflow-repository trustvian/trustvian \
+  --certificate-github-workflow-trigger workflow_dispatch \
+  --certificate-github-workflow-sha 23beffc7a85db17cc22913769f6357953e88dfa0
 ```
 
 The image's collector and the archive's are built from the same commit with
@@ -176,7 +178,7 @@ docker compose run --rm demo make clean            # discard the container's gen
 
 | | Laptop (`make demo`) | Compose |
 |---|---|---|
-| Trustvian | sibling checkout, rebuilt on change | the published v0.10.0, pinned by digest and sha256; edit `Dockerfile` to change release |
+| Trustvian | sibling checkout, rebuilt on change | the published v0.12.0, pinned by digest and sha256; edit `Dockerfile` to change release |
 | `*.localhost` | the OS resolver | `extra_hosts` in `compose.yaml` |
 | Ollama | started by `scripts/lib.sh` if absent | never started; must already answer at `ollama.localhost:11434` |
 | `make demo` (interactive) | the narrated walkthrough | not offered — it needs the `ollama` CLI in the container; use `scenario` and `web` |
@@ -189,7 +191,7 @@ docker compose run --rm demo make clean            # discard the container's gen
 | build: `cannot resolve *.localhost hostnames` | `build.extra_hosts` in `compose.yaml` was removed, or the Compose version is too old to honor it (needs Compose v2.4+) |
 | build: `No services to build` | name the service: `docker compose build demo` (it is behind a profile) |
 | build: `sha256sum: WARNING: 1 computed checksum did NOT match` | the downloaded archive is not the one pinned; check the build host's network or proxy, and never edit the sum to make it pass without reading `checksums.txt` |
-| build: `no Trustvian v0.10.0 archive for linux/<arch>` | only `amd64` and `arm64` are published for Linux |
+| build: `no Trustvian v0.12.0 archive for linux/<arch>` | only `amd64` and `arm64` are published for Linux |
 | `scenario`: "this scenario needs a local Ollama reachable at http://ollama.localhost:11434" | From a container, that is the host's Ollama (`host-gateway`): on Linux set `OLLAMA_HOST=0.0.0.0`; on a Mac make sure the Ollama app is running. Or use the `ollama` profile with `OLLAMA_LOCALHOST=172.28.0.10` |
 | `web`: "no control-plane state yet" | Each `run --rm` is a fresh container, so a separate `run … web` has nothing to serve; use `TRUSTVIAN_WEB=1 … scenario`, or `web` from a `shell` session in which `scenario` already ran |
 | `./out` owned by root on Linux | Docker created it; `sudo chown -R $USER out` once, or create it before the first run |

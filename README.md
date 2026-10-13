@@ -676,8 +676,8 @@ Trustvian's release archives for macOS and Linux carry `trustvian-local` and
 anything:
 
 ```bash
-tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz
-TRUSTVIAN_RELEASE_DIR=$PWD/trustvian_v0.10.0_darwin_arm64 make smoke
+tar xzf trustvian_v0.12.0_darwin_arm64.tar.gz
+TRUSTVIAN_RELEASE_DIR=$PWD/trustvian_v0.12.0_darwin_arm64 make smoke
 ```
 
 `make release-smoke TRUSTVIAN_RELEASE_DIR=<dir>` does that end to end from a
