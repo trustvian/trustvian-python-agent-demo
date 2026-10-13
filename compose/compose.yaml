@@ -1,6 +1,6 @@
 # The Python agent demo, as a Compose stack.
 #
-# One service does the work: `demo` holds Trustvian v0.10.0 (the release
+# One service does the work: `demo` holds Trustvian v0.12.0 (the release
 # archive, and the collector from its signed image, pinned in Dockerfile), the
 # demo and everything `make bootstrap` sets up, and runs the repository's own
 # entry points unchanged. The five *.localhost names the demo addresses its mock

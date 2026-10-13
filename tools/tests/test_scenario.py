@@ -19,9 +19,31 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import yaml
+
 from tvdemo import scenario as scenario_mod
 
 SCENARIOS = sorted((ROOT / "scenarios").rglob("*.yaml"))
+
+
+def _version(path):
+    return str(yaml.safe_load(path.read_text()).get("version"))
+
+
+# This tool's own format, and Trustvian's (`version: v1`), which only
+# `trustvian eval run` reads (scenarios/model-change.yaml).
+STAND_IN_SCENARIOS = [p for p in SCENARIOS if _version(p) == scenario_mod.SCHEMA_VERSION]
+TRUSTVIAN_SCENARIOS = [p for p in SCENARIOS if _version(p) == "v1"]
+
+# Trustvian's scenario format requires every one of these (docs/platform-cli.md,
+# "Behavioral scenarios"); a file missing one is refused before anything runs.
+TRUSTVIAN_GATE_LIMITS = (
+    "added_candidate_presence_minimum",
+    "added_reference_presence_maximum",
+    "max_repeated_added_behaviors",
+    "max_block_decisions_per_run",
+    "max_critical_risk_observations_per_run",
+)
 
 MINIMAL = """
 version: "1"
@@ -105,10 +127,13 @@ class CommittedScenarioTest(unittest.TestCase):
     """Every scenario in the repository is loadable and states its limits."""
 
     def test_there_is_at_least_one(self):
-        self.assertTrue(SCENARIOS, "no scenarios/*.yaml found")
+        self.assertTrue(STAND_IN_SCENARIOS, "no scenarios/*.yaml found")
+
+    def test_every_file_is_one_of_the_two_formats(self):
+        self.assertEqual(sorted(STAND_IN_SCENARIOS + TRUSTVIAN_SCENARIOS), SCENARIOS)
 
     def test_each_one_loads(self):
-        for path in SCENARIOS:
+        for path in STAND_IN_SCENARIOS:
             with self.subTest(scenario=path.name):
                 spec = scenario_mod.load(path)
                 # Every mandatory limit, and nothing but declared optional ones.
@@ -118,9 +143,48 @@ class CommittedScenarioTest(unittest.TestCase):
 
     def test_a_model_free_scenario_exists(self):
         # CI's default jobs must never need Ollama or a model.
-        modelless = [scenario_mod.load(p) for p in SCENARIOS]
+        modelless = [scenario_mod.load(p) for p in STAND_IN_SCENARIOS]
         self.assertTrue(any(not s.needs_a_model for s in modelless),
                         "no scenario runs without a model")
+
+
+class TrustvianScenarioTest(unittest.TestCase):
+    """The files only `trustvian eval run` reads: refused here, complete there."""
+
+    def test_this_tool_refuses_them(self):
+        for path in TRUSTVIAN_SCENARIOS:
+            with self.subTest(scenario=path.name), self.assertRaises(scenario_mod.ScenarioError):
+                scenario_mod.load(path)
+
+    def test_each_states_runs_every_limit_and_both_models(self):
+        self.assertTrue(TRUSTVIAN_SCENARIOS, "no scenario in Trustvian's format")
+        for path in TRUSTVIAN_SCENARIOS:
+            with self.subTest(scenario=path.name):
+                document = yaml.safe_load(path.read_text())
+                runs = document["runs"]
+                self.assertIsInstance(runs, int)
+                gate = document["gate"]
+                for limit in TRUSTVIAN_GATE_LIMITS:
+                    self.assertIsInstance(gate.get(limit), int, limit)
+                k = gate["added_candidate_presence_minimum"]
+                j = gate["added_reference_presence_maximum"]
+                self.assertTrue(0 <= j < k <= runs)
+                self.assertLessEqual(gate.get("min_candidate_frequency", 0), runs)
+                for side in ("reference", "candidate"):
+                    # The model is declared through the variable the agent reads,
+                    # so the comparison's sameness records it.
+                    self.assertEqual(document[side]["model_env"], "OLLAMA_MODEL")
+                    self.assertIn("OLLAMA_MODEL", document[side]["env"])
+
+    def test_the_model_change_changes_only_the_model(self):
+        document = yaml.safe_load((ROOT / "scenarios" / "model-change.yaml").read_text())
+        reference, candidate = document["reference"], document["candidate"]
+        self.assertEqual(reference["command"], candidate["command"])
+        self.assertNotEqual(reference["env"]["OLLAMA_MODEL"], candidate["env"]["OLLAMA_MODEL"])
+        rest = lambda env: {k: v for k, v in env.items() if k != "OLLAMA_MODEL"}
+        self.assertEqual(rest(reference["env"]), rest(candidate["env"]))
+        for part in reference["command"]:
+            self.assertFalse(part.startswith("/"), "paths are relative to the repository")
 
 
 if __name__ == "__main__":

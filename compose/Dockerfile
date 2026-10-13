@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# The whole demo in one image, on the published Trustvian v0.10.0: trustvian
+# The whole demo in one image, on the published Trustvian v0.12.0: trustvian
 # and trustvian-local from the release archive, trustvian-collector from the
 # release's signed collector image, both virtualenvs bootstrap.sh creates.
 # Nothing is built from source and no Go toolchain is installed. The
@@ -19,7 +19,7 @@
 # To move to another release, change all four values together; the README in
 # this directory shows how to read them and how to verify the image.
 
-ARG COLLECTOR_IMAGE=ghcr.io/trustvian/trustvian-collector:v0.10.0@sha256:192b28541fe2441a72d047b3cb72ac93bba0bccf64a140bab4b0673869c9f5ba
+ARG COLLECTOR_IMAGE=ghcr.io/trustvian/trustvian-collector:v0.12.0@sha256:65bb1b61d35b57b0a1efb9d237f71d0cc02e7b41d1cd30d4a58023c7d0a022f0
 
 FROM ${COLLECTOR_IMAGE} AS collector
 
@@ -37,9 +37,9 @@ RUN apt-get update \
 # checked against its pinned sha256 before anything in it is used.
 # ---------------------------------------------------------------------
 ARG TARGETARCH
-ARG TRUSTVIAN_VERSION=v0.10.0
-ARG TRUSTVIAN_SHA256_AMD64=2a8a2a973b2f4b5e0738c9e6110325a612cbe27cdc03882b04d53e9fd2b9fbbf
-ARG TRUSTVIAN_SHA256_ARM64=6ced465332ac723e69766386d9efca5f8bba4ba726cda41bcd95fe80f3da8eed
+ARG TRUSTVIAN_VERSION=v0.12.0
+ARG TRUSTVIAN_SHA256_AMD64=95b4348de9e9722c3b453d488fbd47cda6178fed0b3109645337182ae9ab0241
+ARG TRUSTVIAN_SHA256_ARM64=638961d9ea349a6b04eafb379a82136fca5e286d9c35401baf89f41a37fb7a3e
 
 RUN set -eu; \
     case "$TARGETARCH" in \

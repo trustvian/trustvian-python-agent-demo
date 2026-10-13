@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke scenario stability release-smoke bootstrap clean live
+.PHONY: help demo smoke scenario model-change stability release-smoke bootstrap clean live
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -28,6 +28,14 @@ scenario: ## Run one behavioral scenario: make scenario SCENARIO=scenarios/<name
 	@.demo/tools-venv/bin/python tools/scenario.py \
 		"$(or $(SCENARIO),scenarios/support-fixture.yaml)" \
 		--results .demo/scenario-results.json; \
+	status=$$?; \
+	if [ $$status -eq 1 ]; then \
+		echo "make: the recipe below exited 1 because the gate said FAIL."; \
+	fi; \
+	exit $$status
+
+model-change: ## llama3.2 against gemma3:4b through trustvian eval run, as a report; first: ollama pull llama3.2 gemma3:4b
+	@./scripts/model-change.sh; \
 	status=$$?; \
 	if [ $$status -eq 1 ]; then \
 		echo "make: the recipe below exited 1 because the gate said FAIL."; \
@@ -59,8 +67,8 @@ release-smoke: ## Prove the demo runs from a downloaded release: make release-sm
 	@# documented and hand-tested rather than guarded, which is the trade.
 	@test -n "$(TRUSTVIAN_RELEASE_DIR)" || { \
 		printf 'error: set TRUSTVIAN_RELEASE_DIR to an extracted release archive\n\n'; \
-		printf '    tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz\n'; \
-		printf '    make release-smoke TRUSTVIAN_RELEASE_DIR=$$PWD/trustvian_v0.10.0_darwin_arm64\n\n'; \
+		printf '    tar xzf trustvian_v0.12.0_darwin_arm64.tar.gz\n'; \
+		printf '    make release-smoke TRUSTVIAN_RELEASE_DIR=$$PWD/trustvian_v0.12.0_darwin_arm64\n\n'; \
 		exit 2; }
 	@# A clean .demo/bin, so this cannot pass on binaries a checkout build left
 	@# behind — which is the one way this target could lie.

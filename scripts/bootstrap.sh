@@ -97,8 +97,8 @@ if [ -n "$TRUSTVIAN_RELEASE_DIR" ]; then
        TRUSTVIAN_RELEASE_DIR must name the *extracted* archive directory, the
        one holding the three binaries — not the .tar.gz and not its parent:
 
-           tar xzf trustvian_v0.10.0_darwin_arm64.tar.gz
-           TRUSTVIAN_RELEASE_DIR=\$PWD/trustvian_v0.10.0_darwin_arm64 make bootstrap
+           tar xzf trustvian_v0.12.0_darwin_arm64.tar.gz
+           TRUSTVIAN_RELEASE_DIR=\$PWD/trustvian_v0.12.0_darwin_arm64 make bootstrap
 
        Windows archives carry only trustvian: dev is unsupported there."
     done
