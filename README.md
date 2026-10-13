@@ -31,6 +31,7 @@ Each one is honest about what it proves.
 | PR workflow | A PR that changes agent behavior gets a Trustvian comment and a failing check | no | phase 3 |
 | `make stability RUNS=10` | How often an unchanged agent fails a single-run gate against itself, and what a k/N view shows instead — [results](docs/results/2026-09-27-stability.md) | yes (a simulated variant needs none) | **now** |
 | `make fidelity-sweep RUNS=10 TEMPERATURE=0.7 TIMEOUT=1200 RESULTS=<path>` | Task 078's re-run at tool fidelity: N isolated repetitions per side, every attempt recorded — [results](docs/results/2026-10-01-stability-tool-fidelity.md) | yes | **now** |
+| `make model-change` | A model change read as a report: the same agent on `llama3.2` and on `gemma3:4b`, through `trustvian eval run` — [A model change, as a report](#a-model-change-as-a-report) | Ollama `llama3.2` and `gemma3:4b` | **now** |
 | `make live` | Three agents, each its own card in the Live view, their behavior arriving continuously, with a rare new behavior and a rare failed call — [Live mode](#live-mode) | Ollama `qwen2.5:3b` | **now** |
 | `make injection-bench` | A prompt injection hidden in data changes behavior, and Trustvian catches it without reading content | yes | phase 4 |
 
@@ -425,6 +426,161 @@ make scenario SCENARIO=scenarios/support-demo.yaml   # the model-driven one
 Every gate limit must be stated. Zero is the strictest limit there is, so an
 omitted one is a usage error naming it rather than a silent default.
 
+## A model change, as a report
+
+Change the model and nothing else, then read what the agent did differently.
+`scenarios/model-change.yaml` runs the support agent on `llama3.2` (the
+reference) and on `gemma3:4b` (the candidate), chosen through `OLLAMA_MODEL`,
+four times a side, and `trustvian eval run` gates and records the execution.
+It is Trustvian's own measured
+[Model Change Report](https://github.com/trustvian/trustvian/tree/v0.12.0/docs/results/2026-10-12-model-change-report)
+scenario, adapted to this repository (relative paths, the `support-demo`
+project, four runs instead of ten). Unlike the other files in `scenarios/`, it
+is Trustvian's scenario format, read by `trustvian eval run`, not by
+`tools/scenario.py`.
+
+```bash
+ollama pull llama3.2 gemma3:4b      # 2.0 GB and 3.3 GB, once
+make model-change
+```
+
+`make model-change` (`scripts/model-change.sh`) bootstraps, starts or reuses
+Ollama (pulling `gemma3:4b` when it is missing, as `make demo` does, and
+naming a missing `llama3.2` rather than pulling it), starts a fresh
+control plane and the mock services, runs the scenario, and writes the
+report to `.runtime/model-change.md` and `.runtime/model-change.json`. The
+control plane stays up for the WebUI; `scripts/runtime.sh down` stops it.
+On an Apple M3 Pro the execution took 10 min 55 s, `make model-change`
+11 min in all.
+
+The agent works four of its five tickets (`SUPPORT_AGENT_ROUNDS: "4"`).
+Trustvian's measurement found `llama3.2`, at the demo's temperature 0, not
+answering its planning request for the fifth (`t-1005`) within the agent's
+180 s timeout, twice out of two: the reference side's first repetition then
+fails, and `eval run` exits `3` with no verdict.
+
+What it printed (shortened with `…`):
+
+```text
+support-model-change   runs 4   (execution scn-support-model-change-20261013T190852-390bef04)
+Recorded
+  reference: scenario sha256:3f361506…   inputs not_declared   model llama3.2   prompt_ref not_recorded
+  candidate: scenario sha256:3f361506…   inputs not_declared   model gemma3:4b   prompt_ref not_recorded
+
+Behavior                                  reference   candidate
+  http/GET → crm.localhost                       4/4         4/4
+  …
+  http/GET → billing.localhost                   4/4         0/4   - removed
+  http/POST → ollama.localhost                   4/4         4/4
+  …
+  external/llama3.2 → ollama                     4/4         0/4   - removed
+  …
+  external/gemma3:4b → ollama                    0/4         4/4   + added
+  …
+  tool/billing_lookup                            4/4         0/4   - removed
+  tool/crm_lookup                                4/4         4/4
+
+Gate (k = 3, j = 1)
+  …
+  FAIL repeatedly added behaviors: 1 (<= 0)
+  …
+  FAIL min candidate frequency: 0 (>= 3)
+  FAIL max lost behaviors: 3 (<= 0)
+  PASS max calls per run
+      ollama: 28 (<= 60)   pass
+      ollama.localhost: 28 (<= 60)   pass
+  PASS max llm calls per run: 28 (<= 60)
+
+Sameness
+  same_scenario    true
+  same_inputs      true
+  same_model       false
+  same_prompt_ref  not_recorded
+  …
+  warning model_differs: The reference and candidate sides declared different models.
+
+Gate: FAIL
+```
+
+`eval run` exits `1`, the gate's FAIL, and `make` says so.
+
+**How to read it.**
+
+- **A model change always changes the model's own behavior.** The model's
+  name is the operation of its GenAI span, so `external/llama3.2 → ollama`
+  is removed and lost and `external/gemma3:4b → ollama` is added in every
+  run. That row alone fails `max_repeated_added_behaviors: 0`,
+  `min_candidate_frequency` and `max_lost_behaviors: 0`, whatever else
+  happened. The gate states it; reading past it is the reader's job.
+- **The limits are ones the unchanged agent passes.** `llama3.2` against
+  itself, four runs a side with the same gate, kept every behavior in 4 of 4
+  candidate runs and lost none: `Gate: PASS`, in 7 min 49 s.
+- **Beyond that row, `gemma3:4b` worked the tickets differently:** it never
+  called `billing_lookup` (nor its request to `billing.localhost`), the other
+  two lost behaviors, and made 28 model calls a run where `llama3.2` made 25.
+  Whether that is better support is outside what Trustvian measures.
+- **`ollama` and `ollama.localhost` count the same calls twice.** One model
+  call is a GenAI span on the target `ollama` and the HTTP request beneath it
+  on `ollama.localhost`; both rows read 25 a run on the reference and 28 on
+  the candidate (`1.1×`). Do not add them: 28 model calls a run is not 56.
+- **The sameness says what changed:** the scenario and the inputs were the
+  same, the model was not (`model_differs`), and no prompt reference was
+  declared.
+
+**The report.** Every completed execution keeps one, and `eval run` printed
+its id first:
+
+```bash
+.demo/bin/trustvian eval report scn-support-model-change-20261013T190852-390bef04 --api-url <the control plane> --json
+.demo/bin/trustvian eval report scn-support-model-change-20261013T190852-390bef04 --api-url <the control plane> --format md
+```
+
+`--json` is result document version 2. Its `comparison.counts`:
+
+```json
+{"rows": "17", "added": "1", "removed": "3", "neither": "13", "not_recorded": "0", "lost": "3"}
+```
+
+and a behavior row's display strings, `tool/billing_lookup`'s here:
+
+```json
+"display": {"reference_presence": "4/4", "candidate_presence": "0/4", "reference_calls_per_run": "3–3", "candidate_calls_per_run": "0–0", …}
+```
+
+`--format md` is the same document as Markdown, one table per section:
+
+```text
+| `service` · `external` · `llama3.2` · `ollama` · `local` | `ab138b2d804ae517` | 4/4 | 0/4 | 25–25, mean 25 | 0–0, mean 0 | **− removed** | **lost** | semantic · semantic 100 · transport 0 · unrecorded 0 | — |
+| `service` · `external` · `gemma3:4b` · `ollama` · `local` | `e9f86b3acb1ab0db` | 0/4 | 4/4 | 0–0, mean 0 | 28–28, mean 28 | **+ added** | no | — | semantic · semantic 112 · transport 0 · unrecorded 0 |
+…
+| `ollama` | 25–25, mean 25 | 28–28, mean 28 | 1.1× |
+| `ollama.localhost` | 25–25, mean 25 | 28–28, mean 28 | 1.1× |
+…
+| Input tokens | 53600 | 76644 | 23044 |
+| Output tokens | 11652 | 15228 | 3576 |
+…
+Cost: not available — no pricing table is configured (`pricing_not_configured`).
+…
+- `compare.lost_in_half`: `tool/billing_lookup was in every reference run and is missing from 4 of 4 candidate runs. Task completion may have regressed.`
+```
+
+**There is no cost**, because this repository ships no prices and Trustvian
+ships none either. With real prices, `trustvian-local --pricing <file>` adds
+a cost section with the table's version and source (Trustvian's
+`docs/local-development.md`, "Options").
+
+In the WebUI at the address `make model-change` printed:
+
+- **Change Impact** opens the report with `#execution=<id>`, or from the list
+  of the project's executions: the same tables, the model row reading
+  `llama3.2 | gemma3:4b | differs` with the `model_differs` warning beside
+  the gate. A behavior's `R1`…`C4` open that repetition's observations in
+  Evidence.
+- **Overview**, with `support-demo` chosen, has a **Latest comparison**
+  panel: `Verdict fail · Added 1 · Removed 3 · Lost 3`, `Same scenario true ·
+  inputs true · model false · prompt not_recorded`, the first suggestion, and
+  **Open in Change Impact**.
+
 ## Live mode
 
 `make demo` and the scenarios are runs that end. Live mode is one that does
@@ -488,12 +644,12 @@ ticket, never its text:
 ```text
 live: 3 agents (support-agent, billing-agent, accounts-agent), one run each on http://127.0.0.1:8080, one ticket each every ~10 s, until stopped (Ctrl-C)
 live: watch at http://127.0.0.1:8080/
-support-agent   run dev-live-support-20261012T104903.535Z
-billing-agent   run dev-live-billing-20261012T104903.651Z
-accounts-agent  run dev-live-accounts-20261012T104903.704Z
-support-agent   ticket 1    tools: lookup_customer, send_reply  (9.1 s)
-billing-agent   ticket 20   tools: lookup_customer, lookup_customer, lookup_invoice, lookup_invoice, issue_refund, export_customer  (21.5 s)  failed calls: 2  [drift]
-accounts-agent  ticket 25   tools: lookup_customer, lookup_customer, change_plan  (11.1 s)  failed calls: 1
+support-agent   run dev-live-support-20261013T192925.437Z
+billing-agent   run dev-live-billing-20261013T192925.582Z
+accounts-agent  run dev-live-accounts-20261013T192925.674Z
+support-agent   ticket 1    tools: lookup_customer, send_reply, send_reply  (20.8 s)  failed calls: 1
+billing-agent   ticket 20   tools: lookup_customer, lookup_invoice, issue_refund, export_customer  (16.6 s)  [drift]
+accounts-agent  ticket 27   tools: lookup_customer, lookup_customer, change_plan  (11.9 s)  failed calls: 1
 ```
 
 On **Ctrl-C**, `live.py` sends every dev `SIGINT`; each stops its agent and
@@ -521,13 +677,14 @@ took 100–290 s a ticket, `qwen2.5:3b` 10–14 s at the median. `OLLAMA_MODEL`
 overrides it, and `make live` pulls the model when it is missing, as `make
 demo` does.
 
-What an 11-minute run showed (Trustvian v0.10.0, `qwen2.5:3b` on an Apple M3
-Pro laptop, Ollama with `OLLAMA_NUM_PARALLEL=1`):
+What a 12-minute run showed (Trustvian v0.12.0, `qwen2.5:3b` on an Apple M3
+Pro laptop, the Ollama app with its default settings):
 
 - **Three cards, one per agent**, and three runs, each `completed` after
-  Ctrl-C; no dev, Collector, agent or mock service was left running.
-- **A steady stream.** 85 tickets (28, 26 and 31), about 1,050
-  observations; a ticket took 9.7–14.5 s at the median and 33 s at most. The
+  Ctrl-C, which took about a second; no dev, Collector, agent or mock service
+  was left running.
+- **A steady stream.** 93 tickets (33, 26 and 34), about 1,140
+  observations; a ticket took 12.7 s at the median and 25 s at most. The
   agents never fall behind — each finishes its ticket before it waits for
   the next — but a slower model means fewer tickets.
 - **Each agent's behaviors, in its own run:** `external/qwen2.5:3b → ollama`
@@ -536,25 +693,44 @@ Pro laptop, Ollama with `OLLAMA_NUM_PARALLEL=1`):
   tools: 6 for `support-agent` and `accounts-agent`, 9 for `billing-agent`
   (its three tools, and the drift's `export_customer` with its
   `http/POST → export.localhost`).
-- **The drift** appeared once, at billing ticket 20, about 8½ minutes in —
-  later than in the quick starts, because a ticket takes longer here — on
-  the `billing-agent` card, which the view was following:
-  `tool export_customer`, NEW.
-- **Failed calls:** the ticket lines counted 19 refused tool calls (8 for
-  `support-agent`, 9 for `billing-agent`, 2 for `accounts-agent`): the
-  injected `503`/`429`, and actions the services refused, such as an invoice
-  id the model made up. 36 observations carry an error status: those tool
-  spans, the HTTP requests beneath them, and the two model calls Ctrl-C cut
-  off. The runs went on.
+- **The drift** came once, at billing ticket 20.
+- **Failed calls:** the ticket lines counted 22 refused tool calls (5 for
+  `support-agent`, 14 for `billing-agent`, 3 for `accounts-agent`): the
+  injected `503`/`429`, and actions the services refused (13 of the 35
+  `issue_refund` calls failed). 40 observations carry an error status:
+  those tool spans, the HTTP requests beneath them, and the two model calls
+  Ctrl-C cut off. The runs went on.
+- **Pinning held** (in a 3-minute Compose run). With the view following
+  `billing-agent`, a click on `support-agent` read "Pinned to your
+  selection"; 20 s later it still showed `support-agent` while the other
+  cards kept counting, and **Follow active** went back to "Following newest
+  activity".
+- **Status shows one of the three.** Every dev's Collector reports to the
+  control plane as `dev`, and the control plane holds one report per name,
+  so `trustvian status` and the Status view show one agent's Collector at a
+  time: six reads 5 s apart, natively and under Compose, named
+  `accounts-agent` every time. Each count is that one Collector's
+  (`"received": "48", "evaluated": "48"`), not the fleet's.
 
-What the Live view does not do at Trustvian v0.10.0:
+What the Live view does not do at Trustvian v0.12.0:
 
 - **No pause.** The view keeps moving; to hold one agent still, pin its card.
+  (The **Stop** under "Watch one run" stops watching a run, not the view.)
 - **The canvas draws from the moment you select a run.** The stream keeps
-  no history, so a pinned card's canvas fills as new observations arrive; a
-  one-off such as the drift is drawn only if it arrives while that run is
-  shown. The Live stream table below lists every agent's rows, whichever card
-  is pinned. Earlier evidence is under Runs.
+  no history, so a pinned card's canvas fills as new observations arrive (it
+  read only `Drawing run dev-live-support-…` right after the click, and the
+  support tools 20 s later); a one-off such as the drift is drawn only if it
+  arrives while that run is shown. The Live stream table below lists every
+  agent's rows, whichever card is pinned. Earlier evidence is under Runs.
+
+If the Live page stays empty, ask the pipeline: `.demo/bin/trustvian status
+--api-url http://127.0.0.1:8080` (or the WebUI's **Status** view) names the
+Collector reporting, the spans it received and evaluated, the `service.name`
+it saw, and suggestions naming what to check; with no Collector at all it
+says `No Collector has reported in 30 s. Is 'trustvian dev' running, and is
+trustvian-collector on its path?`. `.demo/bin/trustvian dev --check` starts a
+control plane and a Collector with no workload: a reporting `dev-check`
+Collector and an empty `suggestions` list mean the helpers work.
 
 | Variable | Default | |
 |---|---|---|
@@ -568,8 +744,8 @@ What the Live view does not do at Trustvian v0.10.0:
 | `OLLAMA_MODEL` | `qwen2.5:3b` | live mode's model |
 
 The three agents share one Ollama, which serves `OLLAMA_NUM_PARALLEL`
-requests at a time and queues the rest; at `1`, as measured above, a ticket
-waits for the other agents' model calls, which is what the median includes.
+requests at a time and queues the rest, so a ticket can wait for the other
+agents' model calls, and the median above includes that wait.
 Each role learns into its own baseline under `~/.trustvian/dev/`, kept
 between sessions, so the next session is scored against what this one
 taught.
@@ -695,6 +871,45 @@ published measurement, and it is hand-tested rather than guarded — which is wh
 `make release-smoke` exists as a target you can run rather than a job that runs
 itself.
 
+### Upgrading from Trustvian v0.10.0
+
+`make bootstrap` rebuilds `.demo/bin` when the release (or the checkout's
+commit) changes, so the binaries follow `TRUSTVIAN_RELEASE_DIR`. Two things do
+not follow by themselves:
+
+**The platform database moves one way.** The first v0.12.0 `trustvian-local`
+to open a v0.10.0 state migrates it from schema 9 to 15, and v0.10.0 then
+refuses it:
+
+```text
+trustvian-local: opening platform database: platform: unsupported persistence schema: database reports version 15, this build supports 9
+```
+
+`make demo`, `make smoke`, `make scenario` and `make model-change` start a
+fresh `.trustvian/` every time, so they carry nothing over. Live mode's state
+does carry over: `.demo/live/` natively, and the `live-state` volume under
+Compose. Copy it while its control plane is stopped if it matters; to start
+fresh, `rm -rf .demo/live` (`make clean` removes it with the rest of
+`.demo/`), or `docker compose --profile live down -v` in `compose/`. Rebuild
+the Compose images, the live service's included:
+
+```bash
+cd compose && docker compose build demo && docker compose --profile live build live
+```
+
+**Upgrade the control plane before the CLI.** A v0.12.0 `trustvian eval run`
+sends fields an older control plane refuses, before any repetition starts
+(`trustvian: invalid_request: request body is not valid JSON for this
+endpoint`). Every target here starts its control plane from `.demo/bin`
+except live mode's, which you start by hand: restart it after `make
+bootstrap`, and check it with a route v0.12.0 added, which an older control
+plane answers with `404`:
+
+```bash
+.demo/bin/trustvian status --api-url http://127.0.0.1:8080 >/dev/null && echo "v0.12.0 or later"
+# against an older one: trustvian: server returned HTTP 404   (exit 3)
+```
+
 ### Bootstrap is idempotent
 
 `scripts/bootstrap.sh` runs at the head of everything, so it skips what is
@@ -728,6 +943,7 @@ the control plane open for the WebUI until Ctrl-C by design.
 ```bash
 make demo        # the full interactive demo, leaves the runtime up
 make scenario    # run a scenario file unattended
+make model-change  # llama3.2 against gemma3:4b through trustvian eval run, as a report
 make stability   # measure an unchanged agent against itself: RUNS=10 TEMPERATURE=0.7
 make fidelity-sweep  # the tool-fidelity re-run: RUNS TEMPERATURE TIMEOUT RESULTS, all required
 make live        # live mode: three agents, one run each; needs TRUSTVIAN_API_URL
