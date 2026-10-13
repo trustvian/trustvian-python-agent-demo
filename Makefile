@@ -8,7 +8,7 @@
 # /bin/bash still is on macOS.
 .DEFAULT_GOAL := help
 
-.PHONY: help demo smoke scenario stability release-smoke bootstrap clean live
+.PHONY: help demo smoke scenario model-change stability release-smoke bootstrap clean live
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -28,6 +28,14 @@ scenario: ## Run one behavioral scenario: make scenario SCENARIO=scenarios/<name
 	@.demo/tools-venv/bin/python tools/scenario.py \
 		"$(or $(SCENARIO),scenarios/support-fixture.yaml)" \
 		--results .demo/scenario-results.json; \
+	status=$$?; \
+	if [ $$status -eq 1 ]; then \
+		echo "make: the recipe below exited 1 because the gate said FAIL."; \
+	fi; \
+	exit $$status
+
+model-change: ## llama3.2 against gemma3:4b through trustvian eval run, as a report; first: ollama pull llama3.2 gemma3:4b
+	@./scripts/model-change.sh; \
 	status=$$?; \
 	if [ $$status -eq 1 ]; then \
 		echo "make: the recipe below exited 1 because the gate said FAIL."; \

@@ -1,0 +1,66 @@
+# A model change, as a report: the support agent on llama3.2 against the same
+# agent on gemma3:4b, chosen through OLLAMA_MODEL. Everything else is the same
+# on both sides.
+#
+# Unlike the other files here, this one is Trustvian's own scenario format,
+# run by `trustvian eval run` (`make model-change`), not by tools/scenario.py.
+# It is Trustvian's measured Model Change Report scenario
+# (docs/results/2026-10-12-model-change-report/scenario.yaml at v0.12.0),
+# adapted to this repository: paths relative to its root, the project and
+# agent every other path here uses, and fewer runs.
+#
+# Four of the demo's five tickets (t-1001 to t-1004). That measurement found
+# llama3.2, at the demo's temperature 0, not answering its planning request
+# for t-1005 within the agent's 180 s timeout, in two runs out of two; the
+# reference side then fails its first repetition and there is no verdict.
+#
+# scripts/model-change.sh sets SUPPORT_AGENT_PORT (the port start_mocks chose)
+# and PYTHONPATH in the environment both sides inherit.
+version: v1
+name: support-model-change
+# Four a side, so the scenario takes about ten minutes on an Apple M3 Pro.
+runs: 4
+instrumentation: existing
+project: support-demo
+agent: support-agent
+reference:
+  command: [.demo/venv/bin/opentelemetry-instrument, .demo/venv/bin/python, harness/run_agent.py]
+  candidate: support-llama32
+  model_env: OLLAMA_MODEL
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "4"
+    OLLAMA_MODEL: llama3.2
+candidate:
+  command: [.demo/venv/bin/opentelemetry-instrument, .demo/venv/bin/python, harness/run_agent.py]
+  candidate: support-gemma3
+  model_env: OLLAMA_MODEL
+  env:
+    SUPPORT_AGENT_MODE: reference
+    SUPPORT_AGENT_ROUNDS: "4"
+    OLLAMA_MODEL: gemma3:4b
+gate:
+  # k and j relative to runs, as the measured scenario's 8 and 2 of 10.
+  added_candidate_presence_minimum: 3
+  added_reference_presence_maximum: 1
+  max_repeated_added_behaviors: 0
+  max_block_decisions_per_run: 0
+  max_critical_risk_observations_per_run: 0
+  # Every behavior in all four reference runs must be in at least three
+  # candidate runs, and none may be lost: the reference against itself
+  # (llama3.2 on both sides, runs: 4, Trustvian v0.12.0) passed both, every
+  # behavior in 4 of 4 runs. The model change itself fails both, on the model's
+  # own row; the README says why.
+  min_candidate_frequency: 3
+  max_lost_behaviors: 0
+  # The same self-comparison made 25 model calls a run, the model change's
+  # candidate 28, as in Trustvian's measured report. One model call is counted
+  # under two targets — the GenAI span on `ollama` and the HTTP request beneath
+  # it on `ollama.localhost` — so the two rows hold the same calls and must not
+  # be added.
+  max_calls_per_run:
+    - target: ollama
+      max: 60
+    - target: ollama.localhost
+      max: 60
+  max_llm_calls_per_run: 60
